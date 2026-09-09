@@ -64,8 +64,10 @@ export default async function InvoicesPage({
       vendorName: match.vendor?.name ?? null,
       vendorFilledCount: invoice.vendorFilledFields.length,
       mismatchAcked: invoice.accountMismatchAckedAt !== null,
-      // bulkSetStatus が対象にするのは NEEDS_REVIEW / APPROVED / EXCLUDED のみ
-      selectable: ["NEEDS_REVIEW", "APPROVED", "EXCLUDED"].includes(invoice.status),
+      amount: effectiveAmount(invoice),
+      // 状態を動かせるのは未処理・承認済み・除外の3つだけ。
+      // 出力済み以降も削除はできるので、チェック自体は全ての行に付ける。
+      changeable: ["NEEDS_REVIEW", "APPROVED", "EXCLUDED"].includes(invoice.status),
     };
   });
 
@@ -114,7 +116,9 @@ export default async function InvoicesPage({
         {STATUS_LABELS.NEEDS_REVIEW}の請求書は、内容を確認して承認するまでCSVに出力されません。
         {STATUS_LABELS.NEEDS_REVIEW}・{STATUS_LABELS.APPROVED}・{STATUS_LABELS.EXCLUDED}
         は、チェックを入れて操作すれば行き来できます（承認や除外の取り消し）。
-        {STATUS_LABELS.EXPORTED}以降は、銀行へ送ったデータと帳簿がずれるため変更できません。
+        {STATUS_LABELS.EXPORTED}以降は、銀行へ送ったデータと帳簿がずれるため状態を変更できません。
+        取り込みからやり直したい場合は削除してください。削除すると同じPDFを取り込み直せるようになり、
+        口座情報は取引先マスタから補完されます。CSVの出力履歴は残ります。
       </p>
     </div>
   );

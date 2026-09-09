@@ -4,9 +4,15 @@ import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { InvoiceStatus } from "@/generated/prisma";
-import { bulkSetStatus } from "@/app/actions";
+import { bulkSetStatus, deleteInvoices } from "@/app/actions";
+import { formatYen } from "@/lib/invoices";
 import type { VendorMatchState } from "@/lib/vendors";
-import { StatusBadge, buttonClass, secondaryButtonClass } from "@/components/ui";
+import {
+  StatusBadge,
+  buttonClass,
+  dangerButtonClass,
+  secondaryButtonClass,
+} from "@/components/ui";
 
 /** 一覧の1行。表示に必要な値はサーバー側で組み立て済みのものを受け取る */
 export interface InvoiceRow {
@@ -29,8 +35,10 @@ export interface InvoiceRow {
   vendorFilledCount: number;
   /** 口座相違を「この口座で振り込む」と確認済みか */
   mismatchAcked: boolean;
-  /** 一括操作の対象にできるか。出力済み・読み取り失敗は対象外 */
-  selectable: boolean;
+  /** 削除の確認に出す金額 */
+  amount: number | null;
+  /** 状態を動かせるか（未処理・承認済み・除外のみ）。削除は状態によらずできる */
+  changeable: boolean;
 }
 
 const VENDOR_STATE_STYLES: Record<VendorMatchState, { label: string; className: string }> = {
@@ -65,12 +73,16 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
 
-  const selectableIds = useMemo(() => rows.filter((r) => r.selectable).map((r) => r.id), [rows]);
-  const selectedIds = useMemo(
-    () => selectableIds.filter((id) => selected.has(id)),
-    [selectableIds, selected],
+  const allIds = useMemo(() => rows.map((r) => r.id), [rows]);
+  const selectedRows = useMemo(() => rows.filter((r) => selected.has(r.id)), [rows, selected]);
+  const selectedIds = useMemo(() => selectedRows.map((r) => r.id), [selectedRows]);
+  const allSelected = allIds.length > 0 && selectedIds.length === allIds.length;
+  // 状態変更は未処理・承認済み・除外にしか効かない。選ばせてから黙って
+  // 件数が減らないよう、対象がゼロならボタン自体を出さない。
+  const changeableIds = useMemo(
+    () => selectedRows.filter((r) => r.changeable).map((r) => r.id),
+    [selectedRows],
   );
-  const allSelected = selectableIds.length > 0 && selectedIds.length === selectableIds.length;
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -82,11 +94,20 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
   }
 
   function toggleAll() {
-    setSelected(allSelected ? new Set() : new Set(selectableIds));
+    setSelected(allSelected ? new Set() : new Set(allIds));
+  }
+
+  function run(action: () => Promise<{ ok: boolean; message?: string }>) {
+    startTransition(async () => {
+      const result = await action();
+      setMessage({ ok: result.ok, text: result.message ?? "" });
+      setSelected(new Set());
+      router.refresh();
+    });
   }
 
   function apply(status: "APPROVED" | "EXCLUDED" | "NEEDS_REVIEW") {
-    const ids = selectedIds;
+    const ids = changeableIds;
     if (ids.length === 0) return;
     if (
       status === "APPROVED" &&
@@ -94,13 +115,22 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
     ) {
       return;
     }
+    run(() => bulkSetStatus(ids, status));
+  }
 
-    startTransition(async () => {
-      const result = await bulkSetStatus(ids, status);
-      setMessage({ ok: result.ok, text: result.message ?? "" });
-      setSelected(new Set());
-      router.refresh();
-    });
+  function remove() {
+    if (selectedRows.length === 0) return;
+    const total = selectedRows.reduce((sum, r) => sum + (r.amount ?? 0), 0);
+    const exported = selectedRows.filter((r) => !r.changeable).length;
+
+    let text = `${selectedRows.length}件を削除します（合計 ${formatYen(total)}）。\n\n一覧から消え、同じPDFを取り込み直せるようになります。この操作は取り消せません。`;
+    if (exported > 0) {
+      // 出力済みを消して取り込み直すと二重取込の防止が効かなくなるため、
+      // ここだけは何が起きるかを具体的に書く
+      text += `\n\nうち${exported}件はCSV出力済みです。銀行での振込が完了しているものを削除して取り込み直すと、二重振込になる恐れがあります。\n（CSVの出力履歴とファイルは残ります）`;
+    }
+    if (!window.confirm(text)) return;
+    run(() => deleteInvoices(selectedIds));
   }
 
   return (
@@ -110,30 +140,37 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
           {selectedIds.length > 0 ? (
             <>
               <span className="text-sm font-medium">{selectedIds.length}件を選択中</span>
-              <button
-                type="button"
-                className={buttonClass}
-                disabled={pending}
-                onClick={() => apply("APPROVED")}
-              >
-                {pending ? "処理中…" : "選択した請求書を承認"}
-              </button>
-              <button
-                type="button"
-                className={secondaryButtonClass}
-                disabled={pending}
-                onClick={() => apply("EXCLUDED")}
-              >
-                今回は振り込まない
-              </button>
-              {/* 承認・除外の取り消し。承認済み／除外のタブから未処理へ戻せる */}
-              <button
-                type="button"
-                className={secondaryButtonClass}
-                disabled={pending}
-                onClick={() => apply("NEEDS_REVIEW")}
-              >
-                未処理に戻す
+              {changeableIds.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    className={buttonClass}
+                    disabled={pending}
+                    onClick={() => apply("APPROVED")}
+                  >
+                    {pending ? "処理中…" : "選択した請求書を承認"}
+                  </button>
+                  <button
+                    type="button"
+                    className={secondaryButtonClass}
+                    disabled={pending}
+                    onClick={() => apply("EXCLUDED")}
+                  >
+                    今回は振り込まない
+                  </button>
+                  {/* 承認・除外の取り消し。承認済み／除外のタブから未処理へ戻せる */}
+                  <button
+                    type="button"
+                    className={secondaryButtonClass}
+                    disabled={pending}
+                    onClick={() => apply("NEEDS_REVIEW")}
+                  >
+                    未処理に戻す
+                  </button>
+                </>
+              )}
+              <button type="button" className={dangerButtonClass} disabled={pending} onClick={remove}>
+                削除
               </button>
               <button
                 type="button"
@@ -142,6 +179,12 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
               >
                 選択を解除
               </button>
+              {changeableIds.length < selectedIds.length && (
+                <span className="w-full text-xs text-slate-500">
+                  選択のうち{selectedIds.length - changeableIds.length}
+                  件はCSV出力済みのため、状態は変更できません（削除はできます）。
+                </span>
+              )}
             </>
           ) : (
             message && (
@@ -163,7 +206,7 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                   aria-label="すべて選択"
                   className="h-4 w-4 align-middle"
                   checked={allSelected}
-                  disabled={selectableIds.length === 0}
+                  disabled={allIds.length === 0}
                   onChange={toggleAll}
                 />
               </th>
@@ -186,9 +229,7 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                     aria-label={`${row.vendorLabel} を選択`}
                     className="h-4 w-4 align-middle"
                     checked={selected.has(row.id)}
-                    // 出力済み・振込済み・読み取り失敗は一括操作の対象外。
-                    // 選ばせてから黙って件数が減るより、最初から選べないほうが分かりやすい。
-                    disabled={!row.selectable || pending}
+                    disabled={pending}
                     onChange={() => toggle(row.id)}
                   />
                 </td>

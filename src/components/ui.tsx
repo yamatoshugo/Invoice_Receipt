@@ -64,3 +64,7 @@ export const buttonClass =
 
 export const secondaryButtonClass =
   "rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40";
+
+/** 取り消せない操作（削除）用。押す前に色で気づけるようにする */
+export const dangerButtonClass =
+  "rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-40";

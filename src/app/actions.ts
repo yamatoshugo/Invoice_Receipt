@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Invoice, InvoiceStatus, Vendor } from "@/generated/prisma";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { getFileStore } from "@/lib/storage";
 import { digitsOnly, parseIsoDate } from "@/lib/invoices";
 import {
   describeMatch,
@@ -206,6 +207,38 @@ export async function bulkSetStatus(
     };
   }
   return { ok: true, message: `${count}件を更新しました` };
+}
+
+/**
+ * 一覧からのまとめて削除。
+ *
+ * 二重取込を防いでいるのは sha256 の一意制約なので、行を消せば同じPDFを取り込み直せる。
+ * 取り込み直したときは取引先マスタから補完されるため、消したデータを参照する必要はない。
+ *
+ * CSVの出力履歴（件数・合計・生成したCSVの実体）は ExportBatch に残るので、
+ * 銀行へ何を送ったかの記録は請求書を消しても失われない。
+ */
+export async function deleteInvoices(invoiceIds: string[]): Promise<ActionState> {
+  await requireEmail();
+  if (invoiceIds.length === 0) return { ok: false, message: "対象が選択されていません" };
+
+  const targets = await prisma.invoice.findMany({
+    where: { id: { in: invoiceIds } },
+    select: { id: true, blobPathname: true },
+  });
+  if (targets.length === 0) return { ok: false, message: "対象が見つかりません" };
+
+  const { count } = await prisma.invoice.deleteMany({
+    where: { id: { in: targets.map((t) => t.id) } },
+  });
+
+  // PDFの実体も片付ける。DBから消した後なので、失敗しても不整合にはならない
+  const store = getFileStore();
+  await Promise.all(targets.map((t) => store.delete(t.blobPathname).catch(() => {})));
+
+  revalidatePath("/invoices");
+  revalidatePath("/export");
+  return { ok: true, message: `${count}件を削除しました。同じPDFを取り込み直せます` };
 }
 
 /** 一覧のフォームから呼ぶための薄いラッパー */
