@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { auth, signOut } from "@/auth";
+import { DevModeBanner } from "@/components/DevModeBanner";
 
 // 全ページがログイン中のユーザーとDBの現在値に依存するため、事前生成もキャッシュもしない
 export const dynamic = "force-dynamic";
@@ -16,6 +17,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen">
+      <DevModeBanner />
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center gap-6 px-6 py-3">
           <Link href="/invoices" className="text-sm font-semibold whitespace-nowrap">

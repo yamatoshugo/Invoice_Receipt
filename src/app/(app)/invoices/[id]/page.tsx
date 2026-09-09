@@ -10,8 +10,16 @@ export default async function InvoiceDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const invoice = await prisma.invoice.findUnique({ where: { id } });
+  const invoice = await prisma.invoice.findUnique({
+    where: { id },
+    // どの実装で読み取ったかを出すため、直近の抽出実行を1件だけ添える
+    include: { extractionRuns: { orderBy: { createdAt: "desc" }, take: 1 } },
+  });
   if (!invoice) notFound();
+
+  // ここは口座番号を目視確認して承認する画面。ダミーの読み取り結果を
+  // 本物と取り違えないよう、判断の直前で明示する。
+  const isStub = invoice.extractionRuns[0]?.model === "stub";
 
   return (
     <div>
@@ -20,6 +28,11 @@ export default async function InvoiceDetailPage({
           ← 一覧へ戻る
         </Link>
         <StatusBadge status={invoice.status} />
+        {isStub && (
+          <span className="rounded border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-medium whitespace-nowrap text-red-700">
+            スタブ読み取り（PDF未読）
+          </span>
+        )}
         <h1 className="truncate text-sm font-medium">{invoice.fileName}</h1>
       </div>
 
