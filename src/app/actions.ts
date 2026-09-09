@@ -138,6 +138,11 @@ export async function setInvoiceStatus(
       status,
       excludeReason: status === "EXCLUDED" ? (excludeReason ?? null) : null,
       updatedByEmail: email,
+      // 未処理に戻すのは「もう一度見直す」ということなので、
+      // 口座相違の確認済み記録も外して、承認時にもう一度確認させる
+      ...(status === "NEEDS_REVIEW"
+        ? { accountMismatchAckedAt: null, accountMismatchAckedEmail: null }
+        : {}),
     },
   });
 
@@ -147,10 +152,15 @@ export async function setInvoiceStatus(
   return { ok: true };
 }
 
-/** 一覧からのまとめて承認・除外 */
+/**
+ * 一覧からのまとめて承認・除外・未処理へ戻す。
+ *
+ * 未処理・承認済み・除外の3つは行き来できる（誤って承認や除外をしても取り消せる）。
+ * CSV出力済み・振込済みは対象外。銀行へ送ったデータと帳簿がずれるため。
+ */
 export async function bulkSetStatus(
   invoiceIds: string[],
-  status: Extract<InvoiceStatus, "APPROVED" | "EXCLUDED">,
+  status: Extract<InvoiceStatus, "APPROVED" | "EXCLUDED" | "NEEDS_REVIEW">,
 ): Promise<ActionState> {
   const email = await requireEmail();
   if (invoiceIds.length === 0) return { ok: false, message: "対象が選択されていません" };
@@ -174,7 +184,17 @@ export async function bulkSetStatus(
 
   const { count } = await prisma.invoice.updateMany({
     where: { id: { in: allowed } },
-    data: { status, updatedByEmail: email },
+    data: {
+      status,
+      updatedByEmail: email,
+      // 除外から出るなら理由は残さない
+      excludeReason: status === "EXCLUDED" ? undefined : null,
+      // 未処理に戻すのは「もう一度見直す」ということなので、
+      // 口座相違の確認済み記録も外して、承認時にもう一度確認させる
+      ...(status === "NEEDS_REVIEW"
+        ? { accountMismatchAckedAt: null, accountMismatchAckedEmail: null }
+        : {}),
+    },
   });
 
   revalidatePath("/invoices");

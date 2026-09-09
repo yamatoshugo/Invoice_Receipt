@@ -85,7 +85,7 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
     setSelected(allSelected ? new Set() : new Set(selectableIds));
   }
 
-  function apply(status: "APPROVED" | "EXCLUDED") {
+  function apply(status: "APPROVED" | "EXCLUDED" | "NEEDS_REVIEW") {
     const ids = selectedIds;
     if (ids.length === 0) return;
     if (
@@ -125,6 +125,15 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                 onClick={() => apply("EXCLUDED")}
               >
                 今回は振り込まない
+              </button>
+              {/* 承認・除外の取り消し。承認済み／除外のタブから未処理へ戻せる */}
+              <button
+                type="button"
+                className={secondaryButtonClass}
+                disabled={pending}
+                onClick={() => apply("NEEDS_REVIEW")}
+              >
+                未処理に戻す
               </button>
               <button
                 type="button"

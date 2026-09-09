@@ -112,6 +112,9 @@ export default async function InvoicesPage({
 
       <p className="mt-4 text-xs text-slate-500">
         {STATUS_LABELS.NEEDS_REVIEW}の請求書は、内容を確認して承認するまでCSVに出力されません。
+        {STATUS_LABELS.NEEDS_REVIEW}・{STATUS_LABELS.APPROVED}・{STATUS_LABELS.EXCLUDED}
+        は、チェックを入れて操作すれば行き来できます（承認や除外の取り消し）。
+        {STATUS_LABELS.EXPORTED}以降は、銀行へ送ったデータと帳簿がずれるため変更できません。
       </p>
     </div>
   );
