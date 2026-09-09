@@ -1,0 +1,145 @@
+// 請求書一括振込システム — MVPスキーマ
+//
+// 認証は Auth.js の JWT セッション（アダプタなし）で行うため、
+// ユーザー・セッションのテーブルは持たない。操作者はメールアドレスで記録する。
+
+// 既定の出力先 (node_modules/.prisma/client) は、Next.js が外部モジュールとして
+// 読み込む際に内部の subpath import (#main-entry-point) を解決できず失敗する。
+// アプリのソース配下へ生成してそのままバンドルさせる。
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum InvoiceStatus {
+  /// 抽出直後。人の確認が済むまで必ずここに留まる
+  NEEDS_REVIEW
+  /// LLM抽出に失敗。画面から手入力で補完する
+  EXTRACTION_FAILED
+  /// 振込対象として承認済み
+  APPROVED
+  /// 今回は振り込まない
+  EXCLUDED
+  /// CSVに出力済み。再出力はできない
+  EXPORTED
+  /// ネットバンキングでの振込が完了
+  PAID
+}
+
+model Invoice {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // --- 取り込んだPDF ---
+  fileName     String
+  blobUrl      String
+  blobPathname String
+  /// 同一PDFの二重取込を防ぐ要。ここの一意制約が二重振込の最後の砦になる
+  sha256       String @unique
+  fileSize     Int
+
+  status InvoiceStatus @default(NEEDS_REVIEW)
+
+  // --- 抽出値（すべて人が画面で修正できる） ---
+  vendorName    String?
+  bankCode      String?
+  bankName      String?
+  branchCode    String?
+  branchName    String?
+  /// 全銀の預金種目コード 1=普通 2=当座 4=貯蓄 9=その他
+  accountType   String?
+  accountNumber String?
+  /// 受取人名。CSV出力時に半角カナへ変換する
+  recipientName String?
+  invoiceNumber String?
+  issueDate     DateTime?
+  dueDate       DateTime?
+  /// 請求書に記載された請求金額（円）
+  billedAmount  Int?
+
+  /// 実際に振り込む金額。未設定なら billedAmount を使う
+  transferAmount Int?
+
+  /// 項目ごとの抽出信頼度 { field: number }
+  confidence      Json?
+  extractionError String?
+
+  note          String?
+  excludeReason String?
+
+  /// 最後に内容を更新した操作者
+  updatedByEmail String?
+
+  exportBatch   ExportBatch? @relation(fields: [exportBatchId], references: [id])
+  exportBatchId String?
+
+  extractionRuns ExtractionRun[]
+
+  @@index([status])
+  @@index([dueDate])
+  @@index([exportBatchId])
+}
+
+/// LLM抽出の実行ログ。抽出結果がおかしいときの原因調査に使う
+model ExtractionRun {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId String
+
+  model         String
+  promptVersion String
+  inputTokens   Int?
+  outputTokens  Int?
+  latencyMs     Int?
+  rawResponse   Json?
+  error         String?
+
+  @@index([invoiceId])
+}
+
+/// CSV出力の単位。1回のダウンロードが1バッチに対応する
+model ExportBatch {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  /// 取組日（銀行営業日）
+  transferDate   DateTime
+  recordCount    Int
+  totalAmount    Int
+  fileName       String
+  createdByEmail String
+
+  /// 生成したShift_JIS CSVの実体（base64）。
+  /// ダウンロードに失敗しても再取得できるようにするため保持する。
+  csvBase64 String
+
+  /// ネットバンキングでの振込完了をここで記録する
+  isPaid Boolean   @default(false)
+  paidAt DateTime?
+
+  invoices Invoice[]
+}
+
+/// 振込依頼人の情報。銀行の画面から取得した値を1件だけ保持する
+model Setting {
+  id        String   @id @default("default")
+  updatedAt DateTime @updatedAt
+
+  /// 振込依頼人コード（委託者コード）「20」ではじまる10桁
+  requesterCode       String
+  /// 振込依頼人名。全角で保持し、CSV出力時に半角カナへ変換する
+  requesterName       String
+  senderBankCode      String @default("0038")
+  senderBranchCode    String
+  senderAccountNumber String
+
+  updatedByEmail String?
+}

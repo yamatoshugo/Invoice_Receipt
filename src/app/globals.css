@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN",
+    "Yu Gothic UI", Meiryo, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-slate-50);
+  color: var(--color-slate-900);
+  font-family: var(--font-sans);
+}
+
+/* 金額・口座番号など、桁を目で数える値は等幅で表示する */
+.tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}

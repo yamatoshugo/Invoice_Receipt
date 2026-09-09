@@ -1,0 +1,26 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# Prisma の生成物（prisma generate で再生成する）
+/src/generated/
+
+.DS_Store
+Thumbs.db
+
+# 実請求書・銀行データは絶対にコミットしない
+/samples/
+/tmp/
+*.csv
+!src/**/__fixtures__/*.csv
