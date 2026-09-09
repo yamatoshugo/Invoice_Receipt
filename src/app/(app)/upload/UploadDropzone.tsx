@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { upload } from "@vercel/blob/client";
 import { buttonClass } from "@/components/ui";
+import type { StorageMode } from "@/lib/storage/types";
 
 type ItemState = "waiting" | "uploading" | "extracting" | "done" | "duplicate" | "error";
 
@@ -33,7 +34,34 @@ const STATE_CLASS: Record<ItemState, string> = {
   error: "text-red-700",
 };
 
-export function UploadDropzone() {
+/**
+ * 1通のPDFを保管先へ送り、取り込みAPIに渡す識別子を得る。
+ *
+ * 本番(Vercel Blob)はVercelのリクエストボディ上限(4.5MB)を避けるためブラウザから直接送るが、
+ * ローカル動作確認ではBlobストアが無いのでサーバー経由で置く。
+ * どちらも同じ { pathname, url } を返すので、この先の取り込み経路は共通になる。
+ */
+async function storeFile(file: File, mode: StorageMode): Promise<{ pathname: string; url: string }> {
+  if (mode === "local") {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/api/uploads", { method: "POST", body: form });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error ?? "アップロードに失敗しました");
+    }
+    return res.json();
+  }
+
+  const blob = await upload(file.name, file, {
+    access: "private",
+    handleUploadUrl: "/api/blob/upload",
+    contentType: "application/pdf",
+  });
+  return { pathname: blob.pathname, url: blob.url };
+}
+
+export function UploadDropzone({ mode }: { mode: StorageMode }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<Item[]>([]);
@@ -65,19 +93,15 @@ export function UploadDropzone() {
 
         try {
           update(index, { state: "uploading" });
-          const blob = await upload(file.name, file, {
-            access: "private",
-            handleUploadUrl: "/api/blob/upload",
-            contentType: "application/pdf",
-          });
+          const stored = await storeFile(file, mode);
 
           update(index, { state: "extracting" });
           const res = await fetch("/api/invoices", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              pathname: blob.pathname,
-              url: blob.url,
+              pathname: stored.pathname,
+              url: stored.url,
               fileName: file.name,
               size: file.size,
             }),
@@ -108,7 +132,7 @@ export function UploadDropzone() {
       setRunning(false);
       router.refresh();
     },
-    [items.length, router, update],
+    [items.length, mode, router, update],
   );
 
   return (

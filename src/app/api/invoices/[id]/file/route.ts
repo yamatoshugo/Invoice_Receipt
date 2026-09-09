@@ -1,6 +1,6 @@
-import { get } from "@vercel/blob";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { getFileStore } from "@/lib/storage";
 
 /**
  * PDFの実体を認証付きで中継する。
@@ -21,9 +21,9 @@ export async function GET(
   if (!invoice) return new Response("見つかりません", { status: 404 });
 
   try {
-    const blob = await get(invoice.blobPathname, { access: "private" });
-    if (!blob) return new Response("ファイルが存在しません", { status: 404 });
-    return new Response(blob.stream, {
+    const pdf = await getFileStore().read(invoice.blobPathname);
+    if (!pdf) return new Response("ファイルが存在しません", { status: 404 });
+    return new Response(new Uint8Array(pdf), {
       headers: {
         "Content-Type": "application/pdf",
         // ダウンロードではなくブラウザ内で表示させる

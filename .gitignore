@@ -22,5 +22,7 @@ Thumbs.db
 # 実請求書・銀行データは絶対にコミットしない
 /samples/
 /tmp/
+# ローカル動作確認でPDFを置く場所
+/.uploads/
 *.csv
 !src/**/__fixtures__/*.csv

@@ -1,3 +1,4 @@
+import { storageMode } from "@/lib/storage";
 import { UploadDropzone } from "./UploadDropzone";
 
 export default function UploadPage() {
@@ -9,7 +10,7 @@ export default function UploadPage() {
         読み取りは1件あたり10〜40秒かかります。同じPDFを再度入れても二重には登録されません。
       </p>
 
-      <UploadDropzone />
+      <UploadDropzone mode={storageMode()} />
 
       <div className="mt-8 rounded border border-slate-200 bg-white p-4 text-sm text-slate-600">
         <h2 className="mb-2 font-medium text-slate-900">請求書がURLで届いた場合</h2>

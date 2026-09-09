@@ -22,6 +22,46 @@ Gmailからの自動取り込みと取引先マスタは第2弾。
 
 ---
 
+## ローカルで動かす（デプロイ前の動作確認）
+
+Google Cloud / Vercel Blob / Neon の登録なしで、この4ステップで一通り操作できます。
+外部サービスを使う本番の経路はそのまま残してあり、環境変数で切り替えているだけです。
+
+```bash
+docker compose up -d          # ローカルPostgres（ホスト側ポート 55432）
+cp .env.example .env          # 下記の3行を有効にする
+npx prisma migrate dev        # テーブルを作成
+npm run dev                   # http://localhost:3000
+```
+
+`.env` で有効にする行:
+
+```
+DATABASE_URL="postgresql://invoice:invoice@localhost:55432/invoice?schema=public"
+AUTH_SECRET="..."             # node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+ALLOWED_EMAILS="あなたのメールアドレス"
+AUTH_DEV_LOGIN="1"            # メールアドレスだけでログインできる簡易ログイン
+STORAGE="local"               # PDFを .uploads/ に保存する（Vercel Blob を使わない）
+EXTRACTOR="stub"              # PDFを読まずダミーの読み取り結果を返す
+```
+
+`/signin` に「開発用ログイン」が出るので、`ALLOWED_EMAILS` に入れたアドレスでログインします。
+
+| 変数 | 役割 | 本番との違い |
+|---|---|---|
+| `AUTH_DEV_LOGIN` | メールアドレスだけでログイン | **`NODE_ENV=production` では立てても無効**（`src/auth.ts` で二重にガード） |
+| `STORAGE=local` | PDFを `.uploads/` に保存 | 本番はブラウザから Vercel Blob へ直接アップロード |
+| `EXTRACTOR=stub` | ダミーの読み取り結果 | **本番で指定すると起動時に例外**。偽の口座がCSVに載るのを防ぐため |
+
+`ANTHROPIC_API_KEY` を設定して `EXTRACTOR` の行を消すと、実際の請求書PDFで読み取り精度を確認できます。
+
+投入するPDFが手元に無ければ、`node scripts/make-sample-pdfs.mjs` で `samples/` にサンプルを3通作れます
+（中身は読まれないので `EXTRACTOR=stub` のときだけ意味があります）。
+
+`docker compose down -v` でDBを初期化できます。
+
+---
+
 ## セットアップ
 
 ### 1. 必要な外部サービス

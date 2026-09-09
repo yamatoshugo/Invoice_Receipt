@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { del, get } from "@vercel/blob";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getInvoiceExtractor } from "@/lib/extraction";
+import { getFileStore } from "@/lib/storage";
 import { digitsOnly, parseIsoDate } from "@/lib/invoices";
 
 // LLMでの読み取りに数十秒かかるため、実行時間の上限を引き上げる（Vercel Proが必要）
@@ -34,11 +34,12 @@ export async function POST(request: Request): Promise<Response> {
   const { pathname, url, fileName, size } = parsed.data;
 
   // --- 実体を取得してハッシュを計算 ---
+  const store = getFileStore();
   let pdf: Buffer;
   try {
-    const blob = await get(pathname, { access: "private" });
-    if (!blob) throw new Error("blob not found");
-    pdf = Buffer.from(await new Response(blob.stream).arrayBuffer());
+    const found = await store.read(pathname);
+    if (!found) throw new Error("file not found");
+    pdf = found;
   } catch {
     return Response.json({ error: "アップロードしたファイルを読み込めませんでした" }, { status: 400 });
   }
@@ -50,8 +51,8 @@ export async function POST(request: Request): Promise<Response> {
     select: { id: true, fileName: true, createdAt: true },
   });
   if (duplicate) {
-    // 重複分のBlobは残さない
-    await del(pathname).catch(() => {});
+    // 重複分のファイルは残さない
+    await store.delete(pathname).catch(() => {});
     return Response.json(
       {
         error: "duplicate",

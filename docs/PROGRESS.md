@@ -1,6 +1,6 @@
 # 作業進捗と再開手順
 
-最終更新: 2026-09-04
+最終更新: 2026-09-09
 
 このファイルは、次にこのプロジェクトを開いたときに状況を復元するためのもの。
 「何を作ったか」より **「なぜそう決めたか」「どこで詰まったか」「次に何をするか」** を残す。
@@ -48,27 +48,44 @@
 |---|---|---|
 | M0 事前準備（銀行から値を取得等） | **未着手** | 依頼者側の作業。M5のブロッカー |
 | M1 基盤 | **完了** | Next 16 / Prisma / Auth.js / Blob |
-| M2 取込＆LLM抽出 | **実装完了・未検証** | 実PDFでの精度確認が残っている |
-| M3 確認・編集画面 | **完了** | 一覧・明細・承認/除外 |
-| M4 CSV出力 | **完了（テスト済み）** | 公式サンプルとバイト単位一致 |
+| M2 取込＆LLM抽出 | **動線は検証済み・実PDF精度は未検証** | スタブで全動線を通した。実PDFでの精度確認が残っている |
+| M3 確認・編集画面 | **完了** | 一覧・明細・承認/除外・**一括承認**（残作業#4は消化済み） |
+| M4 CSV出力 | **完了（実行して確認済み）** | 公式サンプルとバイト単位一致 ＋ 実際に生成・ダウンロードまで確認 |
 | M5 受入（銀行実機） | **未着手** | 依頼者側の作業 |
 
 ### 検証できている範囲 — ここが重要
 
-**動作を確認できているのは以下だけ。** 認証情報が未設定のため、外部サービスに触る部分は一度も動かせていない。
+2026-09-09 に、**ローカルで全機能を実際に動かして確認した**（外部サービス登録なしで動く経路を用意した。README「ローカルで動かす」参照）。
 
-✅ 確認済み
-- 単体テスト **68件全通過**（半角カナ変換 / 全銀CSV生成 / 銀行営業日判定）
-- `tsc --noEmit` 型チェック通過
-- `next build` 本番ビルド成功（全13ルート生成）
-- 認証ガード: 未ログインで全ページ・全APIが `/signin` へ307リダイレクトすることをcurlで確認
-- Prismaスキーマの `validate` と `generate`
+✅ 実際に動かして確認済み
+- 単体テスト **68件全通過** / `tsc --noEmit` / `next build`（全16ルート、`ƒ Proxy` 認識）
+- `prisma migrate dev` 実行済み。**`prisma/migrations/20260909034420_init` をコミット済み**（本番デプロイでも使う）
+- 認証: 未ログインは `/signin` へ307。ログイン後に全画面が200
+- 取り込み: PDF保存 → **サーバー側でSHA-256計算** → DB登録 → 抽出 → 各項目のDB反映
+- **二重取込防止**: 同じPDFを再投入して409 + 重複分のファイル削除まで確認
+- PDFプレビュー中継（`/api/invoices/[id]/file`）が `application/pdf` を返すこと
+- Server Action 全件: `saveSettings` / `updateInvoice` / `setInvoiceStatus` / **`bulkSetStatus`** / `markBatchPaid`
+- **編集ロック**: `EXPORTED` の請求書への `setInvoiceStatus` が「CSV出力済みの請求書は変更できません」で拒否されること
+- **CSV出力**: Shift_JIS・CRLF・`1,21,0,...` / `8,件数,合計` / `9` を実バイトで確認。ファイル名 `soufuri_YYYYMMDD.csv`
+- 出力後に対象が `EXPORTED` になり、**再出力すると `?error=validation` で弾かれる**こと
+- 出力履歴からの再ダウンロードが初回とバイト一致すること / 「振込済みにする」で `PAID` になること
 
-❌ 未検証（認証情報が必要）
-- **`prisma migrate` を一度も実行していない**（DBにテーブルが存在しない）
-- Claude APIによる実PDFの抽出精度 — プロンプト調整はここから始まる
-- Vercel Blobへの実アップロード / privateブロブの読み出し
+❌ 未検証（依頼者の準備が必要）
+- **Claude APIによる実PDFの抽出精度** — プロンプト調整はここから始まる（キーを入れて `EXTRACTOR` の行を消せば動く）
+- Vercel Blobへの実アップロード / privateブロブの読み出し（ローカルはファイルシステムで代替した）
+- Google OAuth での実ログイン（ローカルは簡易ログインで代替した）
 - CSVの銀行での受付（M5）
+
+### 分かっている不具合
+
+**明細画面の編集フォームを、JavaScriptが効いていない状態で送信するとレスポンスが返らない。**
+ハイドレーション完了前に「保存」を押した場合が該当する。
+
+- 保存自体は成功する（DBには正しく書き込まれる）。返ってこないのはHTTPレスポンスだけ
+- **JS有効時の通常操作では起きない**（同じ更新をブラウザと同じ経路で呼ぶと283msで完了する）
+- アプリ側のコードが原因ではない。iframeを外しても再現し、`/settings` や `/export` の同じ形のフォームでは起きない。
+  Next.js 16.3.4 の開発サーバーで、`.bind()` した Server Action をノーJS経路で動的ルートに送ったときに再現する
+- 実害は小さいので未対応。気になるなら明細画面のフォームをハイドレーション完了まで `disabled` にするのが手
 
 ---
 
@@ -98,6 +115,12 @@
 4. **Vercelのリクエストボディ上限は4.5MB。** PDFをサーバー経由で送ると引っかかるため、
    ブラウザから Vercel Blob へ直接アップロードする方式にしている（`@vercel/blob/client` の `upload()`）。
 5. `next dev` が **`AGENTS.md` / `CLAUDE.md` を自動生成する**。消してもまた作られるので、そのままコミットしてよい。
+6. **Next 16 で `middleware.ts` は非推奨**（`proxy.ts` に改名、named export も `proxy`）。改名済み。
+   公式ドキュメントの注意通り、Server Action は使用先ページへのPOSTとして扱われ matcher の除外がそのまま効くため、
+   `proxy.ts` だけに頼らず `actions.ts` の `requireEmail()` で毎回セッションを検証している。
+7. **`next dev` 起動中は `npm run build` が EPERM で落ちる。**
+   Prismaのクエリエンジン(`src/generated/prisma/query_engine-windows.dll.node`)を掴んでいるため。
+   ビルド前に開発サーバーを止めること。
 
 ---
 
@@ -113,19 +136,38 @@ src/
 ├ lib/extraction/
 │  ├ types.ts          抽出スキーマ(zod) + InvoiceExtractor インターフェース
 │  ├ claude.ts         Claude実装。システムプロンプトはここ
+│  ├ stub.ts           ダミー実装（EXTRACTOR=stub のとき。本番では例外を投げる）
 │  └ index.ts          実装の選択箇所（差し替えるならここだけ）
+├ lib/storage/         ★ PDFの保管先。extraction と同じ「interface + 実装2つ + index」の形
+│  ├ types.ts          FileStore インターフェース + storageMode()
+│  ├ vercelBlob.ts     本番。private ブロブ
+│  ├ local.ts          ローカル動作確認用。.uploads/ に置く（パストラバーサル対策あり）
+│  └ index.ts          実装の選択箇所
 ├ lib/
 │  ├ prisma.ts / invoices.ts / export.ts
-├ auth.ts              許可メールリストによる認可
-├ middleware.ts        全ルート保護
-├ app/actions.ts       Server Actions（編集・承認・除外・設定保存）
+├ auth.ts              許可メールリストによる認可 ＋ 開発用簡易ログイン
+├ proxy.ts             全ルート保護（Next 16 で middleware から改名）
+├ app/actions.ts       Server Actions（編集・承認・除外・一括操作・設定保存）
 ├ app/api/
-│  ├ blob/upload/      クライアントアップロード用トークン発行
+│  ├ blob/upload/      クライアントアップロード用トークン発行（本番）
+│  ├ uploads/          ローカル保管用のアップロード受け口＋取得口（STORAGE=local 時のみ）
 │  ├ invoices/         POST=取込+抽出（maxDuration=300）
 │  ├ invoices/[id]/file/  PDFの認証付き中継
 │  └ export/           POST=CSV生成、[batchId]=再ダウンロード
 └ app/(app)/           画面: invoices / invoices/[id] / upload / export / settings
+   └ invoices/InvoiceTable.tsx  一覧の表（選択と一括承認/除外）
 ```
+
+### ローカル用の差し替えと、本番に漏らさないための仕掛け
+
+デプロイ前に手元で操作を確認できるよう、外部サービス依存の3箇所を環境変数で差し替えられるようにしてある。
+**どれも本番で誤って有効にならないよう、二重にガードしている。**
+
+| 変数 | 差し替える対象 | ガード |
+|---|---|---|
+| `AUTH_DEV_LOGIN=1` | Google OAuth → メールだけの簡易ログイン | `NODE_ENV !== "production"` との**AND**。本番ビルドではプロバイダ自体が生成されない |
+| `STORAGE=local` | Vercel Blob → `.uploads/` | 明示的に `"local"` と書いたときだけ切り替わる（既定は Vercel Blob） |
+| `EXTRACTOR=stub` | Claude → ダミー値 | **本番で指定されたら例外を投げて止める**。偽の口座番号が振込CSVに載るのは金銭事故そのものなので、黙って通さない |
 
 ### 落としてはいけない安全策（実装済み）
 
@@ -167,12 +209,12 @@ src/
 
 | # | 作業 | 見積 | 備考 |
 |---|---|---|---|
-| 1 | `.env` を埋めて `npx prisma migrate dev` を実行 | 0.1 | **まだテーブルが無い。ここが最初** |
-| 2 | サンプルPDFで抽出精度を確認し、`lib/extraction/claude.ts` のプロンプトを調整 | 0.5 | M2-4の残り。**最初に手を付ける実作業** |
-| 3 | Vercelへデプロイし、Blobアップロードと抽出が本番で通ることを確認 | 0.3 | Preview環境に本番DBを繋がないこと |
-| 4 | 一覧からの一括承認UI（`bulkSetStatus` は実装済み・画面が未接続） | 0.3 | M3-3の残り |
-| 5 | M5 受入: 銀行実機でCSVアップロード → 受付内容確認画面まで（確定せず破棄） | 0.25 | **本番稼働前の必須ゲート** |
-| 6 | M5 受入: 自社別口座宛に1円×2件の実振込テスト | 0.25 | 同上 |
+| ~~1~~ | ~~`.env` を埋めて `npx prisma migrate dev` を実行~~ | — | **完了**。`prisma/migrations/` をコミット済み |
+| ~~4~~ | ~~一覧からの一括承認UI~~ | — | **完了**。`InvoiceTable.tsx` |
+| 1 | `ANTHROPIC_API_KEY` を設定し、実際の請求書PDFで抽出精度を確認して `lib/extraction/claude.ts` のプロンプトを調整 | 0.5 | M2-4の残り。**次に手を付ける実作業**。`.env` から `EXTRACTOR="stub"` の行を消す |
+| 2 | Vercelへデプロイし、Blobアップロードと抽出が本番で通ることを確認 | 0.3 | Preview環境に本番DBを繋がないこと。**`AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR` は設定しない** |
+| 3 | M5 受入: 銀行実機でCSVアップロード → 受付内容確認画面まで（確定せず破棄） | 0.25 | **本番稼働前の必須ゲート** |
+| 4 | M5 受入: 自社別口座宛に1円×2件の実振込テスト | 0.25 | 同上 |
 
 ### そのあと（第2弾・約8人日）
 
@@ -193,20 +235,22 @@ src/
 
 - **Vercel Pro が必要**（抽出に10〜40秒かかるため `maxDuration = 300`）
 - このフォルダは **OneDrive配下の日本語パス**。`node_modules` の同期除外を推奨
-- **`git init` 済み。まだ1件もコミットしていない。** 親の `C:\Users\yamato` が別のGitリポジトリなので、
-  ここで独立したリポジトリを切ってある（親リポジトリを汚さないため）
+- 親の `C:\Users\yamato` が別のGitリポジトリなので、ここで独立したリポジトリを切ってある（親リポジトリを汚さないため）
+- **ローカル動作確認の起動手順は README「ローカルで動かす」を参照。** `docker compose up -d` でPostgresが立つ
 - `npm audit` が high 3件を報告するが、`prisma` CLI（devDependency）の依存 `deepmerge-ts` のDoS。
   ランタイムの `@prisma/client` は対象外。修正するとバージョン不整合が起きるため据え置き
 
 ### よく使うコマンド
 
 ```bash
-npm run dev        # 開発サーバー
-npm test           # 単体テスト（68件）
+docker compose up -d   # ローカルPostgres（ホスト側 55432）
+npm run dev            # 開発サーバー
+npm test               # 単体テスト（68件）
 npm run typecheck
-npm run build      # prisma generate + next build
-npm run db:migrate # マイグレーション
-npm run db:studio  # DBの中身をブラウザで確認
+npm run build          # prisma generate + next build（開発サーバーを止めてから）
+npm run db:migrate     # マイグレーション
+npm run db:studio      # DBの中身をブラウザで確認
+node scripts/make-sample-pdfs.mjs   # 動作確認用のサンプルPDFを samples/ に作る
 ```
 
 ### 参照する外部仕様

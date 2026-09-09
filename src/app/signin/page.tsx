@@ -1,4 +1,6 @@
-import { signIn } from "@/auth";
+import { redirect } from "next/navigation";
+import { AuthError } from "next-auth";
+import { devLoginEnabled, signIn } from "@/auth";
 
 export default async function SignInPage({
   searchParams,
@@ -35,6 +37,47 @@ export default async function SignInPage({
             Googleでログイン
           </button>
         </form>
+
+        {devLoginEnabled && (
+          <div className="mt-8 border-t border-dashed border-slate-300 pt-6">
+            <p className="text-xs font-medium text-amber-700">
+              開発用ログイン（本番では無効）
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              デプロイ前の動作確認用です。パスワードの確認は行いません。
+            </p>
+            <form
+              className="mt-3 space-y-2"
+              action={async (formData: FormData) => {
+                "use server";
+                try {
+                  await signIn("dev-login", {
+                    email: String(formData.get("email") ?? ""),
+                    redirectTo: "/invoices",
+                  });
+                } catch (e) {
+                  // signIn の redirectTo は例外として送出されるため、認証エラーだけを拾う
+                  if (e instanceof AuthError) redirect("/signin?error=dev-login");
+                  throw e;
+                }
+              }}
+            >
+              <input
+                type="email"
+                name="email"
+                required
+                placeholder="you@example.com"
+                className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm focus:border-slate-900 focus:outline-none"
+              />
+              <button
+                type="submit"
+                className="w-full rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                このメールアドレスでログイン
+              </button>
+            </form>
+          </div>
+        )}
       </div>
     </main>
   );
