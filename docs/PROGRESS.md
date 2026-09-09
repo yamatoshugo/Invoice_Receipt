@@ -7,6 +7,42 @@
 
 ---
 
+## 0. 再開するとき、まずここを読む
+
+**現在地: ローカルでは全機能が動いて実請求書で検証済み。まだ一度もデプロイしていない。**
+
+| 項目 | 状態 |
+|---|---|
+| リポジトリ | https://github.com/yamatoshugo/Invoice_Receipt （`main`、コミット6件、プッシュ済み） |
+| 動作 | ローカルで取り込み〜CSV出力まで通しで確認済み（実請求書3通） |
+| デプロイ | **未実施**。Vercel / Neon / Google OAuth / Vercel Blob はまだ何も作っていない |
+| 銀行での受入(M5) | **未実施**。本番稼働前の必須ゲート |
+| テスト | 90件（zengin: kana 30 / csv 25 / businessDay 13、vendors 22） |
+
+### 手元で動かす（3コマンド）
+
+```bash
+docker compose up -d   # ローカルPostgres（ホスト側 55432）
+npm run dev            # http://localhost:3000
+# ログインは /signin の「開発用ログイン」にメールアドレスを入れるだけ
+```
+
+`.env` はGit管理外だが**すでに埋まっている**（DBはローカルDocker、`ANTHROPIC_API_KEY` 設定済み、
+`AUTH_DEV_LOGIN=1` と `STORAGE=local` が有効、`EXTRACTOR` はコメントアウトして実際の読み取りを使用）。
+消えていたら README「ローカルで動かす」を見て作り直す。
+
+### ローカルDBに今入っているもの
+
+請求書3件 / 取引先1件（大和秀吾） / 出力履歴1件 / 振込依頼人設定1件。
+すべて動作確認で作ったもの。`docker compose down -v` で全部消せる。
+`samples/` に依頼者の実請求書PDFが3通ある（**Git管理外**）。
+
+### いま直近で困っていること
+
+なし。次の一手は「取引先を増やして抽出精度を再確認」→「Vercelへデプロイ」（§5参照）。
+
+---
+
 ## 1. このプロジェクトは何か
 
 月に約50件届く請求書を手入力で振込処理している状態を解消する。
@@ -24,7 +60,7 @@
 | 稼働形態 | Vercel にデプロイするWebアプリ（PC利用前提。Dockerやデスクトップアプリは不可） |
 | メール基盤 | Google Workspace（**MVPでは連携せず、認証にのみGoogleを使う**） |
 | PDF抽出 | LLMを使う。「新規取引先をルール作成で捌くのは無理」という判断。ただし**セキュリティは重視**との要望あり |
-| 取引先口座 | 取引先マスタを持つ方針（**第2弾**。MVPでは毎回PDFから抽出して人が目視確認） |
+| 取引先口座 | 取引先マスタを持つ方針（第2弾の予定だった → **前倒しで実装済み**） |
 | 金額 | **控除なし**。請求額をそのまま振り込む（源泉徴収・振込手数料の自動計算は作らない） |
 | 技術選定 | おまかせ |
 
@@ -35,10 +71,22 @@
 | 切った機能 | MVP中の運用でどうするか |
 |---|---|
 | Gmail API 自動取込 | Gmailで添付を一括DLしてドラッグ&ドロップ（月1回・5分程度） |
-| 取引先マスタ・口座差分警告 | 毎回PDFから抽出した口座を人が目視確認（全件レビューを必須運用に） |
+| ~~取引先マスタ・口座差分警告~~ | **実装済み**（第2弾から前倒し。理由は §5 の経緯を参照） |
 | URL型請求書の自動検知 | 人がURLからDLして他のPDFと一緒に投入 |
 | 監査ログ | 最終更新者(`updatedByEmail`)のみ記録 |
 | 銀行/支店マスタ照合・ゆうちょ変換 | 桁数と文字種のバリデーションのみ。ゆうちょ宛は手動振込に回す |
+
+### MVPの範囲を超えて追加したもの（2026-09-09）
+
+依頼者が実際に触ったうえで出た要望に対応した。いずれも運用上どうしても必要だったもの。
+
+1. **取引先マスタ**（第2弾から前倒し）— プロンプトv2で金融機関コード・支店番号を
+   LLMに補完させない方針にした結果、毎回手入力が必要になったため
+2. **承認・除外の取り消し**（未処理へ戻す）— 誤操作を戻せなかったため
+3. **請求書の削除**（出力済みを含む）— CSVを作ったが銀行にアップロードしなかった場合に、
+   取り込みからやり直す手段が無かったため
+4. **ローカル動作確認用の差し替え**（簡易ログイン / ローカル保管 / スタブ抽出）—
+   デプロイ前に手元で全機能を触れるようにするため
 
 ---
 
@@ -64,8 +112,16 @@
 - 取り込み: PDF保存 → **サーバー側でSHA-256計算** → DB登録 → 抽出 → 各項目のDB反映
 - **二重取込防止**: 同じPDFを再投入して409 + 重複分のファイル削除まで確認
 - PDFプレビュー中継（`/api/invoices/[id]/file`）が `application/pdf` を返すこと
-- Server Action 全件: `saveSettings` / `updateInvoice` / `setInvoiceStatus` / **`bulkSetStatus`** / `markBatchPaid`
+- Server Action 全件を実際に呼んで確認:
+  `saveSettings` / `updateInvoice` / `setInvoiceStatus` / `bulkSetStatus` / `markBatchPaid` /
+  `saveVendor` / `deleteVendor` / `registerVendorFromInvoice` / `updateVendorFromInvoice` /
+  `acknowledgeAccountMismatch` / `applyVendorToInvoice` / `deleteInvoices`
 - **編集ロック**: `EXPORTED` の請求書への `setInvoiceStatus` が「CSV出力済みの請求書は変更できません」で拒否されること
+- **状態の行き来**: 承認済み・除外 → 未処理 → 再び承認・除外 が一括操作でできること。
+  出力済みのIDを直接渡しても `0件を更新しました` で動かないこと
+- **削除と再取り込み**: 出力済み1件を削除 → PDFの実体も消え、出力履歴とCSVは残る →
+  同じPDFを再アップロードして取り込み成功 → 取引先マスタから2項目が自動補完される。
+  削除していない請求書の二重取込は引き続き409で弾かれる
 - **CSV出力**: Shift_JIS・CRLF・`1,21,0,...` / `8,件数,合計` / `9` を実バイトで確認。ファイル名 `soufuri_YYYYMMDD.csv`
 - 出力後に対象が `EXPORTED` になり、**再出力すると `?error=validation` で弾かれる**こと
 - 出力履歴からの再ダウンロードが初回とバイト一致すること / 「振込済みにする」で `PAID` になること
@@ -145,7 +201,7 @@ src/
 │  ├ kana.ts           全銀の半角カナ変換（法人格略号・濁点分離・使用不可文字検出）
 │  ├ csv.ts            全銀CSV生成 + 全バリデーション
 │  ├ businessDay.ts    銀行営業日判定（祝日は計算式。外部データ非依存）
-│  └ *.test.ts         68テスト。csv.test.ts に公式サンプルのゴールデンテスト
+│  └ *.test.ts         kana 30 / csv 25 / businessDay 13。csv.test.ts に公式サンプルのゴールデンテスト
 ├ lib/extraction/
 │  ├ types.ts          抽出スキーマ(zod) + InvoiceExtractor インターフェース
 │  ├ claude.ts         Claude実装。システムプロンプトはここ
@@ -157,12 +213,17 @@ src/
 │  ├ local.ts          ローカル動作確認用。.uploads/ に置く（パストラバーサル対策あり）
 │  └ index.ts          実装の選択箇所
 ├ lib/vendors.ts       ★ 取引先マスタとの照合。純関数のみ（vendors.test.ts で22件）
-│                      一覧・明細・承認ガードが全てここを呼ぶので判定がずれない
+│                      matchVendor() を一覧・明細・承認ガードが全て呼ぶので判定がずれない
 ├ lib/
 │  ├ prisma.ts / invoices.ts / export.ts
 ├ auth.ts              許可メールリストによる認可 ＋ 開発用簡易ログイン
 ├ proxy.ts             全ルート保護（Next 16 で middleware から改名）
-├ app/actions.ts       Server Actions（編集・承認・除外・一括操作・設定保存）
+├ app/actions.ts       Server Actions 全部ここ（requireEmail が非公開なので分割していない）
+│                      請求書: updateInvoice / setInvoiceStatus / bulkSetStatus / deleteInvoices
+│                      取引先: saveVendor / deleteVendor / registerVendorFromInvoice /
+│                              updateVendorFromInvoice / acknowledgeAccountMismatch /
+│                              applyVendorToInvoice
+│                      その他: saveSettings / markBatchPaid
 ├ app/api/
 │  ├ blob/upload/      クライアントアップロード用トークン発行（本番）
 │  ├ uploads/          ローカル保管用のアップロード受け口＋取得口（STORAGE=local 時のみ）
@@ -257,20 +318,22 @@ src/
    - 振込依頼人名（銀行に届け出ている名義）
    - 仕向支店番号（3桁）／依頼人口座番号（7桁）
 2. **総合振込サービスの契約状況・上限件数・受付締切時刻**を銀行に確認
-3. **過去の請求書PDFを10〜20通用意**（抽出精度の検証用）
-4. 各種アカウント: Neon / Google Cloud OAuth / Vercel Pro / Vercel Blob / Anthropic APIキー
+3. **請求書PDFを追加で用意**（抽出精度の検証用）— 現在3通あるが**すべて同じ発行者**。
+   他社フォーマットが無いと精度の判断ができない
+4. 各種アカウント: Neon / Google Cloud OAuth / Vercel Pro / Vercel Blob（Anthropic APIキーは取得済み）
+5. **Anthropic APIキーのローテーション** — チャットに平文で貼られたため、本番運用前に作り直す
 
 ### 開発側の残作業（優先順）
 
 | # | 作業 | 見積 | 備考 |
 |---|---|---|---|
-| ~~1~~ | ~~`.env` を埋めて `npx prisma migrate dev` を実行~~ | — | **完了**。`prisma/migrations/` をコミット済み |
-| ~~4~~ | ~~一覧からの一括承認UI~~ | — | **完了**。`InvoiceTable.tsx` |
-| ~~1~~ | ~~実際の請求書PDFで抽出精度を確認しプロンプトを調整~~ | — | **完了**（プロンプト v2）。取引先が増えたら再確認する |
-| 1 | 取引先を増やして精度を再確認（今は1社3通のみ） | 0.3 | 他社フォーマット・複数口座・ゆうちょが出たときの挙動 |
+| 1 | 取引先を増やして抽出精度を再確認（今は1社3通のみ） | 0.3 | 他社フォーマット・複数口座・ゆうちょが出たときの挙動。`claude.ts` の `SYSTEM_PROMPT` を直したら `PROMPT_VERSION` を上げる |
 | 2 | Vercelへデプロイし、Blobアップロードと抽出が本番で通ることを確認 | 0.3 | Preview環境に本番DBを繋がないこと。**`AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR` は設定しない** |
 | 3 | M5 受入: 銀行実機でCSVアップロード → 受付内容確認画面まで（確定せず破棄） | 0.25 | **本番稼働前の必須ゲート** |
 | 4 | M5 受入: 自社別口座宛に1円×2件の実振込テスト | 0.25 | 同上 |
+
+**完了済み**: `.env` とマイグレーション / 一括承認UI / 実PDFでの抽出精度確認（プロンプトv2） /
+取引先マスタ / 状態の行き来 / 請求書の削除。
 
 ### そのあと（第2弾・約4.5人日）
 
@@ -292,7 +355,12 @@ src/
 - **Vercel Pro が必要**（抽出に10〜40秒かかるため `maxDuration = 300`）
 - このフォルダは **OneDrive配下の日本語パス**。`node_modules` の同期除外を推奨
 - 親の `C:\Users\yamato` が別のGitリポジトリなので、ここで独立したリポジトリを切ってある（親リポジトリを汚さないため）
+- **リモートは https://github.com/yamatoshugo/Invoice_Receipt （`origin/main`）。**
+  プッシュ前に毎回、`.env` / `samples/` / `.uploads/` / `*.csv` が混ざっていないことと、
+  `sk-ant-` を含む文字列が履歴に無いことを確認している
 - **ローカル動作確認の起動手順は README「ローカルで動かす」を参照。** `docker compose up -d` でPostgresが立つ
+- `.gitignore` で除外しているもの: `.env` / `samples/`（実請求書）/ `.uploads/`（保管したPDF）/
+  `*.csv` / `src/generated/`（prisma generate で再生成）
 - `npm audit` が high 3件を報告するが、`prisma` CLI（devDependency）の依存 `deepmerge-ts` のDoS。
   ランタイムの `@prisma/client` は対象外。修正するとバージョン不整合が起きるため据え置き
 
@@ -301,7 +369,7 @@ src/
 ```bash
 docker compose up -d   # ローカルPostgres（ホスト側 55432）
 npm run dev            # 開発サーバー
-npm test               # 単体テスト（68件）
+npm test               # 単体テスト（90件）
 npm run typecheck
 npm run build          # prisma generate + next build（開発サーバーを止めてから）
 npm run db:migrate     # マイグレーション
