@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getInvoiceExtractor } from "@/lib/extraction";
 import { getFileStore } from "@/lib/storage";
 import { digitsOnly, parseIsoDate } from "@/lib/invoices";
+import { describeMatch, fillFromVendor, matchVendor } from "@/lib/vendors";
 
 // LLMでの読み取りに数十秒かかるため、実行時間の上限を引き上げる（Vercel Proが必要）
 export const maxDuration = 300;
@@ -99,23 +100,38 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const d = result.data;
+
+  // --- 取引先マスタとの照合 ---
+  // 読み取った値をそのまま材料にして、空欄の項目だけをマスタから埋める。
+  // 更新は下の1回にまとめ、途中で失敗して中途半端な状態が残らないようにする。
+  const extracted = {
+    vendorName: d.vendorName,
+    bankCode: digitsOnly(d.bankCode),
+    bankName: d.bankName,
+    branchCode: digitsOnly(d.branchCode),
+    branchName: d.branchName,
+    accountType: d.accountType,
+    accountNumber: digitsOnly(d.accountNumber),
+    recipientName: d.recipientName,
+  };
+  const match = matchVendor(extracted, await prisma.vendor.findMany());
+  const filled = fillFromVendor(match);
+  const matchNote = describeMatch(match, extracted);
+
   const updated = await prisma.invoice.update({
     where: { id: invoice.id },
     data: {
-      vendorName: d.vendorName,
-      bankCode: digitsOnly(d.bankCode),
-      bankName: d.bankName,
-      branchCode: digitsOnly(d.branchCode),
-      branchName: d.branchName,
-      accountType: d.accountType,
-      accountNumber: digitsOnly(d.accountNumber),
-      recipientName: d.recipientName,
+      ...extracted,
+      ...filled,
       invoiceNumber: d.invoiceNumber,
       issueDate: parseIsoDate(d.issueDate),
       dueDate: parseIsoDate(d.dueDate),
       billedAmount: d.billedAmount,
       confidence: d.confidence,
-      note: d.notes,
+      // 読み取りのメモは消さず、マスタ照合の結果を後ろに足す
+      note: [d.notes, matchNote].filter(Boolean).join("\n") || null,
+      vendorId: match.vendor?.id ?? null,
+      vendorFilledFields: match.fillable.filter((f) => f in filled),
       status: "NEEDS_REVIEW",
     },
   });

@@ -7,6 +7,7 @@ import { setInvoiceStatus, updateInvoice, type ActionState } from "@/app/actions
 import { toZenginKana, RECIPIENT_NAME_MAX_LENGTH } from "@/lib/zengin/kana";
 import { LOW_CONFIDENCE_THRESHOLD } from "@/lib/extraction/types";
 import { Field, inputClass, buttonClass, secondaryButtonClass, ErrorBox } from "@/components/ui";
+import { VendorMatchPanel, type VendorMatchInfo } from "./VendorMatchPanel";
 
 function toDateInput(date: Date | null): string {
   if (!date) return "";
@@ -24,7 +25,26 @@ function ConfidenceMark({ score }: { score: number | undefined }) {
   );
 }
 
-export function InvoiceForm({ invoice }: { invoice: Invoice }) {
+/** 取引先マスタから補完した項目に印を付ける。請求書から読み取った値と区別するため */
+function VendorMark({ filled }: { filled: boolean }) {
+  if (!filled) return null;
+  return (
+    <span
+      className="ml-1 rounded border border-slate-300 bg-slate-100 px-1 text-[10px] font-normal text-slate-600"
+      title="取引先マスタから補完した値です。請求書には記載がありません"
+    >
+      マスタ
+    </span>
+  );
+}
+
+export function InvoiceForm({
+  invoice,
+  matchInfo,
+}: {
+  invoice: Invoice;
+  matchInfo: VendorMatchInfo;
+}) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState<ActionState, FormData>(
     updateInvoice.bind(null, invoice.id),
@@ -37,6 +57,17 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
   const confidence = (invoice.confidence ?? {}) as Record<string, number>;
   const kana = toZenginKana(recipientName);
   const locked = invoice.status === "EXPORTED" || invoice.status === "PAID";
+  const filledByVendor = new Set(invoice.vendorFilledFields);
+
+  /**
+   * 請求書に印字が無かった項目を明示する。
+   * 読めなかった項目は確信度0で空欄になるが、空欄のままでは
+   * 「読み落とし」なのか「そもそも書かれていない」のかが担当者に伝わらない。
+   */
+  function notPrintedHint(field: string, value: string | null) {
+    if (value || confidence[field] !== 0) return undefined;
+    return <span className="text-slate-500">請求書に記載なし。確認して入力してください</span>;
+  }
 
   function changeStatus(status: "APPROVED" | "EXCLUDED" | "NEEDS_REVIEW") {
     setStatusError(null);
@@ -63,10 +94,12 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
       )}
 
       {invoice.note && (
-        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm whitespace-pre-line text-amber-900">
           <span className="font-medium">読み取り時の申し送り:</span> {invoice.note}
         </div>
       )}
+
+      <VendorMatchPanel invoiceId={invoice.id} info={matchInfo} locked={locked} />
 
       <form action={formAction} className="space-y-4">
         <fieldset disabled={locked} className="space-y-4">
@@ -80,8 +113,10 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 <>
                   金融機関コード（4桁）
                   <ConfidenceMark score={confidence.bankCode} />
+                  <VendorMark filled={filledByVendor.has("bankCode")} />
                 </>
               }
+              hint={notPrintedHint("bankCode", invoice.bankCode)}
             >
               <input
                 name="bankCode"
@@ -90,7 +125,7 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 inputMode="numeric"
               />
             </Field>
-            <Field label="金融機関名">
+            <Field label={<>金融機関名<VendorMark filled={filledByVendor.has("bankName")} /></>}>
               <input name="bankName" defaultValue={invoice.bankName ?? ""} className={inputClass} />
             </Field>
             <Field
@@ -98,8 +133,10 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 <>
                   支店番号（3桁）
                   <ConfidenceMark score={confidence.branchCode} />
+                  <VendorMark filled={filledByVendor.has("branchCode")} />
                 </>
               }
+              hint={notPrintedHint("branchCode", invoice.branchCode)}
             >
               <input
                 name="branchCode"
@@ -108,7 +145,7 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 inputMode="numeric"
               />
             </Field>
-            <Field label="支店名">
+            <Field label={<>支店名<VendorMark filled={filledByVendor.has("branchName")} /></>}>
               <input name="branchName" defaultValue={invoice.branchName ?? ""} className={inputClass} />
             </Field>
             <Field
@@ -116,8 +153,10 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 <>
                   預金種目
                   <ConfidenceMark score={confidence.accountType} />
+                  <VendorMark filled={filledByVendor.has("accountType")} />
                 </>
               }
+              hint={notPrintedHint("accountType", invoice.accountType)}
             >
               <select name="accountType" defaultValue={invoice.accountType ?? ""} className={inputClass}>
                 <option value="">未選択</option>
@@ -132,8 +171,10 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
                 <>
                   口座番号（7桁以内）
                   <ConfidenceMark score={confidence.accountNumber} />
+                  <VendorMark filled={filledByVendor.has("accountNumber")} />
                 </>
               }
+              hint={notPrintedHint("accountNumber", invoice.accountNumber)}
             >
               <input
                 name="accountNumber"
@@ -149,6 +190,7 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
               <>
                 受取人名（口座名義）
                 <ConfidenceMark score={confidence.recipientName} />
+                <VendorMark filled={filledByVendor.has("recipientName")} />
               </>
             }
             hint={
@@ -273,7 +315,11 @@ export function InvoiceForm({ invoice }: { invoice: Invoice }) {
           {statusError && <p className="mt-2 text-sm text-red-700">{statusError}</p>}
           <p className="mt-2 text-xs text-slate-500">
             承認したものだけがCSV出力の対象になります。項目名の横の
-            <span className="text-amber-600">●</span> は読み取りの確信度が低い項目です。
+            <span className="text-amber-600">●</span> は読み取りの確信度が低い項目、
+            <span className="mx-1 rounded border border-slate-300 bg-slate-100 px-1 text-[10px]">
+              マスタ
+            </span>
+            は請求書ではなく取引先マスタから埋めた項目です。
           </p>
         </div>
       )}

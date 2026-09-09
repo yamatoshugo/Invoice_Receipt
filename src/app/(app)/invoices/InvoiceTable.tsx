@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { InvoiceStatus } from "@/generated/prisma";
 import { bulkSetStatus } from "@/app/actions";
+import type { VendorMatchState } from "@/lib/vendors";
 import { StatusBadge, buttonClass, secondaryButtonClass } from "@/components/ui";
 
 /** 一覧の1行。表示に必要な値はサーバー側で組み立て済みのものを受け取る */
@@ -22,8 +23,40 @@ export interface InvoiceRow {
   dueDateLabel: string;
   missing: boolean;
   hasNote: boolean;
+  /** 取引先マスタとの照合結果 */
+  vendorState: VendorMatchState;
+  vendorName: string | null;
+  vendorFilledCount: number;
+  /** 口座相違を「この口座で振り込む」と確認済みか */
+  mismatchAcked: boolean;
   /** 一括操作の対象にできるか。出力済み・読み取り失敗は対象外 */
   selectable: boolean;
+}
+
+const VENDOR_STATE_STYLES: Record<VendorMatchState, { label: string; className: string }> = {
+  matched: { label: "一致", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  account_mismatch: { label: "口座相違", className: "bg-red-50 text-red-700 border-red-300" },
+  name_mismatch: { label: "名称相違", className: "bg-amber-50 text-amber-800 border-amber-300" },
+  none: { label: "新規", className: "bg-slate-50 text-slate-600 border-slate-200" },
+};
+
+/** 取引先マスタと突き合わせた結果。補完されたのか新規なのかを一覧で分かるようにする */
+function VendorMatchCell({ row }: { row: InvoiceRow }) {
+  const style = VENDOR_STATE_STYLES[row.vendorState];
+  return (
+    <div className="text-xs">
+      <span className={`rounded border px-1.5 py-0.5 whitespace-nowrap ${style.className}`}>
+        {style.label}
+      </span>
+      {row.vendorName && <div className="mt-0.5 truncate text-slate-500">{row.vendorName}</div>}
+      {row.vendorFilledCount > 0 && (
+        <div className="text-slate-500">{row.vendorFilledCount}項目を補完</div>
+      )}
+      {row.vendorState === "account_mismatch" && row.mismatchAcked && (
+        <div className="text-slate-500">確認済み</div>
+      )}
+    </div>
+  );
 }
 
 export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
@@ -127,6 +160,7 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
               </th>
               <th className="px-3 py-2 font-medium">状態</th>
               <th className="px-3 py-2 font-medium">取引先</th>
+              <th className="px-3 py-2 font-medium">取引先マスタ</th>
               <th className="px-3 py-2 font-medium">振込先</th>
               <th className="px-3 py-2 font-medium">受取人名（変換後）</th>
               <th className="px-3 py-2 text-right font-medium">振込額</th>
@@ -157,6 +191,9 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                     {row.vendorLabel}
                   </Link>
                   <div className="text-xs text-slate-500">{row.fileName}</div>
+                </td>
+                <td className="max-w-40 px-3 py-2">
+                  <VendorMatchCell row={row} />
                 </td>
                 <td className="tabular px-3 py-2 text-xs whitespace-nowrap">
                   {row.bankLine ? (

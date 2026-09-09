@@ -76,6 +76,16 @@ model Invoice {
   /// 最後に内容を更新した操作者
   updatedByEmail String?
 
+  // --- 取引先マスタとの照合 ---
+  /// 取り込み時に照合できた取引先。削除されても請求書は全項目を自身に持つので SetNull でよい
+  vendor   Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  vendorId String?
+  /// 取り込み時にマスタから補完した項目名。「何をしたか」の記録なので後から変わらない
+  vendorFilledFields String[]
+  /// マスタと口座が食い違うまま「この口座で振り込む」と人が確認した記録
+  accountMismatchAckedAt    DateTime?
+  accountMismatchAckedEmail String?
+
   exportBatch   ExportBatch? @relation(fields: [exportBatchId], references: [id])
   exportBatchId String?
 
@@ -84,6 +94,39 @@ model Invoice {
   @@index([status])
   @@index([dueDate])
   @@index([exportBatchId])
+  @@index([vendorId])
+}
+
+/// 支払先の口座情報。一度人が確認した値をここに集約し、次回以降の請求書に補完する。
+///
+/// 補完だけが目的ではない。同じ取引先なのに口座が違う請求書は口座変更詐欺の典型なので、
+/// 取引先名で照合して検知できるようにしてある。
+model Vendor {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// 画面に出す表記
+  name     String
+  /// 照合用に正規化した名前。重複登録は照合を曖昧にするので一意にする
+  matchKey String @unique
+
+  // 口座項目は全て必須。「人が確認済みの完全な1件」であることに意味があり、
+  // 半端なレコードで補完すると、どこまで検証済みか分からなくなる。
+  bankCode      String
+  bankName      String
+  branchCode    String
+  branchName    String
+  /// 全銀の預金種目コード 1=普通 2=当座 4=貯蓄 9=その他
+  accountType   String
+  accountNumber String
+  /// 口座名義。CSVの受取人名になる
+  recipientName String
+
+  note           String?
+  updatedByEmail String?
+
+  invoices Invoice[]
 }
 
 /// LLM抽出の実行ログ。抽出結果がおかしいときの原因調査に使う

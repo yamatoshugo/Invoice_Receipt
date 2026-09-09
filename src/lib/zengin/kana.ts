@@ -33,7 +33,7 @@ function isAllowedChar(ch: string): boolean {
  * 先頭にあれば `ｶ)`、末尾にあれば `(ｶ`、中間にあれば `(ｶ)` に変換する。
  * 長い表記から先に判定する必要があるため、登録順ではなく文字数降順で使用する。
  */
-const ENTITY_ABBREVIATIONS: ReadonlyArray<readonly [string, string]> = [
+export const ENTITY_ABBREVIATIONS: ReadonlyArray<readonly [string, string]> = [
   ["株式会社", "ｶ"],
   ["有限会社", "ﾕ"],
   ["合資会社", "ｼ"],

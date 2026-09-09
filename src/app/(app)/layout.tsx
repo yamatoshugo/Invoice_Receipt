@@ -10,6 +10,7 @@ const NAV = [
   { href: "/upload", label: "取り込み" },
   { href: "/export", label: "CSV出力" },
   { href: "/settings", label: "設定" },
+  { href: "/vendors", label: "取引先" },
 ];
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {

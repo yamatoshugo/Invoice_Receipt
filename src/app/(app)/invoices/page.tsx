@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { InvoiceStatus } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 import { effectiveAmount, formatDate, formatYen, STATUS_LABELS } from "@/lib/invoices";
+import { matchVendor } from "@/lib/vendors";
 import { toZenginKana } from "@/lib/zengin/kana";
 import { InvoiceTable, type InvoiceRow } from "./InvoiceTable";
 
@@ -21,10 +22,15 @@ export default async function InvoicesPage({
   const { filter = "open" } = await searchParams;
   const active = FILTERS.find((f) => f.key === filter) ?? FILTERS[0];
 
-  const invoices = await prisma.invoice.findMany({
-    where: active.statuses ? { status: { in: active.statuses } } : undefined,
-    orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
-  });
+  // 取引先マスタとの照合状態は保存せず毎回突き合わせる。
+  // 保存すると、請求書を直したときやマスタを更新したときに実態とずれる。
+  const [invoices, vendors] = await Promise.all([
+    prisma.invoice.findMany({
+      where: active.statuses ? { status: { in: active.statuses } } : undefined,
+      orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }],
+    }),
+    prisma.vendor.findMany(),
+  ]);
 
   const total = invoices.reduce((sum, i) => sum + (effectiveAmount(i) ?? 0), 0);
 
@@ -32,6 +38,7 @@ export default async function InvoicesPage({
   // クライアントには選択と一括操作だけを持たせる。
   const rows: InvoiceRow[] = invoices.map((invoice) => {
     const kana = invoice.recipientName ? toZenginKana(invoice.recipientName) : null;
+    const match = matchVendor(invoice, vendors);
     return {
       id: invoice.id,
       status: invoice.status,
@@ -53,6 +60,10 @@ export default async function InvoicesPage({
         !invoice.accountType ||
         effectiveAmount(invoice) === null,
       hasNote: Boolean(invoice.note),
+      vendorState: match.state,
+      vendorName: match.vendor?.name ?? null,
+      vendorFilledCount: invoice.vendorFilledFields.length,
+      mismatchAcked: invoice.accountMismatchAckedAt !== null,
       // bulkSetStatus が対象にするのは NEEDS_REVIEW / APPROVED / EXCLUDED のみ
       selectable: ["NEEDS_REVIEW", "APPROVED", "EXCLUDED"].includes(invoice.status),
     };
