@@ -13,7 +13,7 @@ export function SettingsForm({ setting }: { setting: Setting | null }) {
   const kana = toZenginKana(requesterName);
 
   return (
-    <form action={formAction} className="max-w-lg space-y-4">
+    <form action={formAction} className="space-y-4">
       <Field
         label="振込依頼人コード（委託者コード）"
         hint="ネットバンキングの［資金移動 ≫ 振込データの新規作成］画面に表示される「20」ではじまる10桁の番号"

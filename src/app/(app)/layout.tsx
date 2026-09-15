@@ -20,7 +20,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <div className="min-h-screen">
       <DevModeBanner />
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center gap-6 px-6 py-3">
+        <div className="mx-auto flex max-w-[1600px] items-center gap-6 px-6 py-3 lg:px-10">
           <Link href="/invoices" className="text-sm font-semibold whitespace-nowrap">
             請求書一括振込
           </Link>
@@ -50,7 +50,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
+      {/* ヘッダーと同じ幅・同じ余白にする（ずれるとナビと本文の左端が合わない） */}
+      <main className="mx-auto max-w-[1600px] px-6 py-8 lg:px-10">{children}</main>
     </div>
   );
 }
