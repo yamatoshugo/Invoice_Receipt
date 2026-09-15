@@ -220,9 +220,34 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 入れ終わったら **Deploy** を押す。
 
 - ビルド中に `prisma migrate deploy` が走り、**Neonにテーブルが自動で作られる**
-- 3〜5分で完了し、`https://invoice-receipt-xxxx.vercel.app` のようなURLが発行される
-- **このURLを控える**（次で使う）
+- 3〜5分で完了する
 - この時点ではまだログインできない（リダイレクトURIが未登録のため）。**それで正しい**
+
+### 3-4. ★「本番URL」を正しく取る
+
+完了画面に出るURLは**そのデプロイ専用のURL**で、デプロイのたびに変わる。
+これを登録すると、次のデプロイでログインもGmail連携も壊れる。
+
+**Settings → Domains** を開き、一番上にある**固定のドメイン**を使うこと。
+
+```
+✅ https://invoice-receipt.vercel.app          ← これを使う（固定）
+❌ https://invoice-receipt-abc123def.vercel.app ← デプロイごとに変わる
+```
+
+このURLを控える。以降 `<本番URL>` と書いたらこれのこと。
+
+### 3-5. ★環境変数を Production 限定にする
+
+取り込み画面で入れた環境変数は、既定で **Production / Preview / Development の3つ全部**に
+適用されている。このままだと、将来ブランチを切ったときに
+**Preview環境が本番DBに接続してマイグレーションを流す**。
+
+**Settings → Environment Variables** で、少なくとも `DATABASE_URL` と `DIRECT_URL` は
+**Production だけにチェック**を残す（他の変数も同様にしておくと安全）。
+
+> Previewを使いたくなったら、Neonで**別ブランチのDB**を作ってPreview用に割り当てる。
+> **本番DBをPreviewに繋いではいけない。**
 
 ---
 
@@ -314,6 +339,7 @@ CSVは仕様書のサンプルとバイト単位で一致させてあるが、�
 | PDFのプレビューが開けない | Blobストアがプロジェクトに接続されていない（`BLOB_READ_WRITE_TOKEN` が無い） |
 | 「読み取りに失敗しました」が全件で出る | `ANTHROPIC_API_KEY` が未設定・失効・残高切れのいずれか |
 
-Preview環境（`git push` のたびに作られる）は、環境変数を入れていないのでビルドに失敗する。
+Preview環境（main以外のブランチをpushすると作られる）は、環境変数を Production 限定に
+してあればビルドに失敗する。
 **それで正しい。** 使いたい場合は、Neonで**別ブランチのDB**を作ってPreview用に割り当てること。
 **本番DBをPreviewに繋いではいけない。**
