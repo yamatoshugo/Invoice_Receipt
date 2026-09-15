@@ -13,7 +13,12 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // 実行時の接続。Neonでは「プール経由(-pooler)」のURLを使う。
+  // サーバーレスは関数ごとに接続を張るので、直結だと接続数を使い切る
   url      = env("DATABASE_URL")
+  // マイグレーション専用の接続。★プール(PgBouncer)経由ではDDLが通らないことがあるため、
+  // Neonの「直結」URLを入れる。ローカルはプールが無いので両方同じ値でよい
+  directUrl = env("DIRECT_URL")
 }
 
 /// 取り込み元。既存行はすべて手動アップロードなので既定を UPLOAD にする
