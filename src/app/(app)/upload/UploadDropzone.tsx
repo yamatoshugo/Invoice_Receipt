@@ -53,12 +53,39 @@ async function storeFile(file: File, mode: StorageMode): Promise<{ pathname: str
     return res.json();
   }
 
-  const blob = await upload(file.name, file, {
-    access: "private",
-    handleUploadUrl: "/api/blob/upload",
-    contentType: "application/pdf",
-  });
-  return { pathname: blob.pathname, url: blob.url };
+  try {
+    const blob = await upload(file.name, file, {
+      access: "private",
+      handleUploadUrl: "/api/blob/upload",
+      contentType: "application/pdf",
+    });
+    return { pathname: blob.pathname, url: blob.url };
+  } catch (error) {
+    // @vercel/blob は理由を問わず "Failed to retrieve the client token" としか言わない。
+    // 実際にはトークン発行APIが失敗しているので、どこを見ればよいかを画面に出す
+    const message = error instanceof Error ? error.message : String(error);
+    if (/client token/i.test(message)) {
+      const detail = await tokenEndpointReason();
+      throw new Error(detail ?? `${message}（Vercel Blobの接続を確認してください）`);
+    }
+    throw error;
+  }
+}
+
+/** トークン発行APIを単体で叩き、サーバーが返している本当の理由を取り出す */
+async function tokenEndpointReason(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/blob/upload", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // 本文が不正でも、接続漏れ・未ログインの判定はその手前で返る
+      body: JSON.stringify({}),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return data.error ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function UploadDropzone({ mode }: { mode: StorageMode }) {

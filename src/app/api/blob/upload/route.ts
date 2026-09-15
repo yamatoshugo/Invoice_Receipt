@@ -15,6 +15,20 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "ログインが必要です" }, { status: 401 });
   }
 
+  // 接続漏れを、ブラウザ側の「Failed to retrieve the client token」で終わらせない。
+  // あの文言は「トークン発行に失敗した」としか言わないので、原因がここだと分からない
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    console.error("BLOB_READ_WRITE_TOKEN が設定されていません");
+    return Response.json(
+      {
+        error:
+          "Vercel Blob が接続されていません。Vercelの Storage → Blob を作成し、" +
+          "Connect to Project（接頭辞は付けない）→ 再デプロイしてください",
+      },
+      { status: 500 },
+    );
+  }
+
   const body = (await request.json()) as HandleUploadBody;
 
   try {
@@ -30,6 +44,9 @@ export async function POST(request: Request): Promise<Response> {
     });
     return Response.json(result);
   } catch (error) {
+    // ブラウザ側には@vercel/blobの汎用メッセージしか出ないので、
+    // 実際の理由をサーバーのログ（Vercelの Logs タブ）に必ず残す
+    console.error("Blobのクライアントトークン発行に失敗しました:", error);
     return Response.json(
       { error: error instanceof Error ? error.message : "アップロードに失敗しました" },
       { status: 400 },
