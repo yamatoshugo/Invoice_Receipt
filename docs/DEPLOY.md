@@ -13,72 +13,138 @@
 
 ---
 
-## 0. 事前に手元で作っておくもの
+## 0. 事前に手元で作っておくもの — 鍵を2つ
 
-あとで貼り付けるので、先に作ってメモ帳に控えておく。
+**鍵はどこかに申請して発行してもらうものではない。自分のPCで乱数を作るだけ。**
+アカウント登録も通信も不要で、作った時点でそれが鍵になる。
 
-```bash
-# 1) セッションの署名鍵
-openssl rand -base64 32
+| メモする名前 | 用途 | 形式 |
+|---|---|---|
+| `AUTH_SECRET` | ログインセッション（Cookie）の署名鍵 | base64の44文字 |
+| `GMAIL_TOKEN_KEY` | Gmailのリフレッシュトークンを暗号化する鍵 | base64の44文字（**32バイト厳守**） |
 
-# 2) Gmailトークンの暗号化鍵（上とは別の値にする）
-openssl rand -base64 32
-```
+`GMAIL_TOKEN_KEY` は **base64にして32バイトちょうど**でないと、アプリが起動時に弾く
+（`lib/gmail/crypto.ts`）。下のコマンドはその条件を満たす。
 
-Windowsで `openssl` が無ければ PowerShell で:
+### Windows（PowerShell）
+
+スタートメニューで `powershell` と入力 → **Windows PowerShell** を開き、次の1行を貼って Enter。
+管理者権限は不要。
 
 ```powershell
-[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+$b = [byte[]]::new(32); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
 ```
 
-| メモする名前 | 用途 |
-|---|---|
-| `AUTH_SECRET` | ログインセッションの署名鍵 |
-| `GMAIL_TOKEN_KEY` | Gmailのリフレッシュトークンを暗号化する鍵 |
+**`Get-Random` は使わないこと。** 暗号用ではない疑似乱数なので、鍵の材料にしてはいけない。
+上のコマンドはWindowsの暗号用乱数(CNG)を使う。
+
+### Git Bash / macOS / Linux
+
+```bash
+openssl rand -base64 32
+```
+
+### 手順
+
+1. コマンドを実行 → `t7Qw…=` のような **44文字**が表示される
+2. メモ帳に `AUTH_SECRET = （貼り付け）` と書いて保存
+3. **もう一度同じコマンドを実行**（毎回違う値が出る）
+4. メモ帳に `GMAIL_TOKEN_KEY = （貼り付け）` と書き足す
 
 **2つは必ず別の値にする。** `AUTH_SECRET` の入れ替えは「全員ログアウトするだけ」の
-安全な操作だが、同じ鍵にするとその副作用で**Gmail連携が無言で壊れる**ため。
+安全な日常操作だが、同じ鍵を使い回すと、その操作の副作用で**Gmail連携が無言で壊れる**。
+
+**ローカルの `.env` にある値は流用せず、本番用に新しく作る。**
+手元の開発環境と本番で鍵を共有しない（片方が漏れたときの影響範囲を分けるため）。
+
+> **この2つは絶対にチャット・メール・Slackに貼らないこと。**
+> 貼った時点で作り直しが必要になる（このプロジェクトでは実際に
+> Anthropic APIキーで一度それが起きている）。
 
 ---
 
 ## 1. Neon（データベース）を作る
 
-1. https://neon.tech にGoogleアカウントでサインアップ
-2. **Create project**
-   - Project name: `invoice-receipt`
-   - Postgres version: 既定のまま
-   - Region: **日本から近いもの**（Tokyo があれば Tokyo、無ければ Singapore）
-3. 作成後に表示される接続文字列を**2種類**コピーする（Connection Details の画面）
-   - **Pooled connection** … ホスト名に `-pooler` が入っているほう → `DATABASE_URL`
-   - **Direct connection** … `-pooler` が入っていないほう → `DIRECT_URL`
-   - どちらも末尾が `?sslmode=require` になっていること
+請求書・取引先・出力履歴を入れる本番のデータベース。無料プランで始めてよい。
 
-> 2種類に分けるのは、**プール経由だとマイグレーション（テーブル作成）が通らないことがある**ため。
-> 実行時はプール、テーブル作成は直結、と使い分ける。
+### 1-1. アカウントを作る
+
+1. https://neon.tech を開き、右上の **Sign up**
+2. **Continue with GitHub**（Vercelと同じGitHubアカウントにしておくと後が楽）
+3. 職種などを聞かれたら適当に答えて進む
+
+### 1-2. プロジェクトを作る
+
+サインアップ直後、そのままプロジェクト作成画面になる（ならなければ **New Project**）。
+
+| 項目 | 入れる値 |
+|---|---|
+| Project name | `invoice-receipt` |
+| Postgres version | **既定のまま**（変更不要） |
+| Region | リストに **Tokyo (ap-northeast-1)** があればそれ。無ければ **Singapore (ap-southeast-1)** |
+
+**Create project** を押す。10秒ほどで出来上がる。
+
+> データベース名は `neondb` になるが、**変えなくてよい**。名前は何でも動く。
+
+### 1-3. 接続文字列を2種類そろえる ★ここが要点
+
+作成直後に **Connection string** が表示される（消えてしまったら
+プロジェクト画面の **Connect** ボタン、または **Dashboard → Connection Details**）。
+
+```
+postgresql://neondb_owner:【パスワード】@ep-xxxx-yyyy-pooler.ap-northeast-1.aws.neon.tech/neondb?sslmode=require
+                                                    ~~~~~~~
+```
+
+**ホスト名に `-pooler` が入っているかどうかだけが違う**、2つのURLが要る。
+
+| 用途 | 環境変数 | ホスト名 |
+|---|---|---|
+| 実行時（アプリからの読み書き） | `DATABASE_URL` | `-pooler` **あり** |
+| マイグレーション（テーブル作成） | `DIRECT_URL` | `-pooler` **なし** |
+
+画面に **Pooled connection** のチェックボックス（または Pooled / Direct の切り替え）が
+あればそれで両方コピーする。見当たらなければ、**コピーした1本から手で作れる**:
+
+- `-pooler` が入っている → それが `DATABASE_URL`。`-pooler` を**削る**と `DIRECT_URL`
+- `-pooler` が入っていない → それが `DIRECT_URL`。`.ap-` の直前に `-pooler` を**足す**と `DATABASE_URL`
+
+2つに分けるのは、**プール(PgBouncer)経由だとテーブル作成のSQLが通らないことがある**ため。
+実行時はプール（サーバーレスは関数ごとに接続を張るので、直結だと接続数を使い切る）、
+テーブル作成は直結、と使い分ける。
+
+### 1-4. 手元で疎通を確認する（強く推奨）
+
+**Vercelでビルドする前に、URLが正しいことをここで確かめておく。**
+ここを飛ばすと、URLの打ち間違いが「Vercelのビルド失敗」という分かりにくい形で出る。
+
+Git Bash（またはVS Codeのターミナル）で、プロジェクトのフォルダに移動して実行する:
+
+```bash
+DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx prisma migrate status
+```
+
+期待する出力:
+
+```
+5 migrations found in prisma/migrations
+Following migrations have not yet been applied: ...
+```
+
+「まだ適用されていない」と出れば**成功**（テーブルはVercelのビルド時に作られる）。
+ついでに、ここで先にテーブルを作ってしまってもよい:
+
+```bash
+DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx prisma migrate deploy
+```
+
+> **接続文字列にはパスワードが含まれている。** チャットやメールに貼らないこと。
+> 万一漏らしたら、Neonの **Roles → Reset password** で作り直せる。
 
 ---
 
-## 2. Vercel（ホスティング）を用意する
-
-1. https://vercel.com にGitHubアカウントでサインアップ
-2. **Settings → Billing** から **Pro プラン**にアップグレード
-   - **必須**。請求書の読み取りに10〜40秒かかり、無料プランは10秒で強制終了されるため
-3. **Add New → Project** → GitHubの `yamatoshugo/Invoice_Receipt` を **Import**
-4. 設定画面が出るが、**この時点では「Deploy」を押さない**。先に環境変数を入れる（次の手順）
-   - Framework Preset が `Next.js` になっていることだけ確認する
-   - Build Command / Output Directory は**触らない**（`vercel-build` が自動で使われる）
-
----
-
-## 3. Vercel Blob（PDFの保管先）を作る
-
-1. Vercelのプロジェクト画面 → **Storage** タブ → **Create Database** → **Blob**
-2. 名前は `invoice-pdfs` など。**Connect to Project** で今のプロジェクトに接続する
-3. 接続すると `BLOB_READ_WRITE_TOKEN` が**自動で環境変数に入る**（手で入力しなくてよい）
-
----
-
-## 4. ログイン用の Google OAuth クライアントを作る
+## 2. ログイン用の Google OAuth クライアントを作る
 
 **★Gmail取り込み用とは別のGCPプロジェクトに作ること。**
 「内部(Internal)」はクライアント単位ではなく**プロジェクト単位**の設定なので、共有すると
@@ -92,52 +158,94 @@ Windowsで `openssl` が無ければ PowerShell で:
 3. **APIとサービス → 認証情報 → 認証情報を作成 → OAuth クライアント ID**
    - アプリケーションの種類: **ウェブ アプリケーション**
    - 名前: `invoice-receipt-web`
-   - **承認済みのリダイレクト URI**: いまは空のままでよい（手順6で本番URLを登録する）
+   - **承認済みのリダイレクト URI**: いまは空のままでよい（手順5で本番URLを登録する）
 4. 作成後に表示される **クライアントID** と **クライアントシークレット**を控える
 
 ---
 
-## 5. Vercelに環境変数を入れて、1回目のデプロイ
+## 3. Vercel にプロジェクトを作って1回目のデプロイ
 
-Vercelのプロジェクト → **Settings → Environment Variables** で以下を追加する。
-**Environment は `Production` だけにチェックを入れる**（Preview/Development には入れない）。
+### 3-1. サインアップとPro契約
+
+1. https://vercel.com → **Sign Up** → **Continue with GitHub**
+2. 個人アカウント（Hobby）ができるので、**Pro にアップグレード**する
+   - 画面右上のアカウント → **Settings → Billing → Upgrade**
+   - 料金はメンバー1人あたり月額（画面で最新の金額を確認すること）
+
+**Proが要る理由は2つ。**
+
+- **Hobbyプランは規約上、商用利用が認められていない。** 会社の支払業務で使う以上、
+  タイムアウトの話を抜きにしてもProが要る
+- **関数の実行時間の上限**が違う。Hobbyは60秒、Proは300秒。
+  このアプリは `api/invoices` `api/gmail/scan` `api/gmail/items/[id]/import` の3つで
+  `maxDuration = 300` を宣言している。請求書1通の読み取りに10〜40秒、
+  Gmailの走査はメール数十通ぶんを1リクエストで回すため、60秒では途中で切られる
+
+### 3-2. リポジトリを取り込む
+
+1. **Add New → Project**
+2. GitHubの `yamatoshugo/Invoice_Receipt` の行で **Import**
+   - 一覧に出ないときは **Adjust GitHub App Permissions** でこのリポジトリを許可する
+3. 設定画面で確認するのは1点だけ
+   - **Framework Preset** が `Next.js` になっていること
+   - **Build Command / Output Directory / Install Command は触らない**
+     （`package.json` の `vercel-build` が自動で使われ、その中で
+     `prisma migrate deploy` が走ってNeonにテーブルが作られる）
+
+### 3-3. ★Deployを押す前に、環境変数を入れる
+
+同じ画面の **Environment Variables** を開き、以下を1つずつ追加する。
+（**ここで入れておかないと1回目のビルドが失敗する。** `DATABASE_URL` が無いと
+マイグレーションが実行できないため）
 
 | 変数名 | 値 |
 |---|---|
 | `DATABASE_URL` | Neonの **Pooled** 接続文字列 |
 | `DIRECT_URL` | Neonの **Direct** 接続文字列 |
 | `AUTH_SECRET` | 手順0で作った1つ目 |
-| `AUTH_GOOGLE_ID` | 手順4のクライアントID |
-| `AUTH_GOOGLE_SECRET` | 手順4のクライアントシークレット |
+| `AUTH_GOOGLE_ID` | 手順2のクライアントID |
+| `AUTH_GOOGLE_SECRET` | 手順2のクライアントシークレット |
 | `ALLOWED_EMAILS` | ログインを許可するアドレス（カンマ区切り）例: `henry@meetingtechnology.co.jp` |
 | `ANTHROPIC_API_KEY` | Anthropicのキー（**本番用に作り直したもの**） |
 | `GMAIL_CLIENT_ID` | Gmail取り込み用（ローカルの `.env` と同じ値） |
 | `GMAIL_CLIENT_SECRET` | 同上 |
 | `GMAIL_TOKEN_KEY` | 手順0で作った2つ目 |
-| `APP_BASE_URL` | **いまは仮で `https://example.com`**（手順6で本物に直す） |
+| `APP_BASE_URL` | **いまは仮で `https://example.com`**（手順5で本物に直す） |
 
 > **絶対に入れてはいけない3つ**: `AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR`
 > - `AUTH_DEV_LOGIN` … メールアドレスだけで誰でもログインできてしまう
 > - `STORAGE` … PDFの保管先がサーバー上の一時領域になり、消える
 > - `EXTRACTOR` … **偽の口座情報が振込CSVに載る**。本番では起動時にエラーで止まるようにしてある
 
-入れ終わったら **Deployments → Deploy**（または Import 画面の Deploy）を押す。
+入れ終わったら **Deploy** を押す。
 
 - ビルド中に `prisma migrate deploy` が走り、**Neonにテーブルが自動で作られる**
 - 3〜5分で完了し、`https://invoice-receipt-xxxx.vercel.app` のようなURLが発行される
 - **このURLを控える**（次で使う）
+- この時点ではまだログインできない（リダイレクトURIが未登録のため）。**それで正しい**
 
 ---
 
-## 6. 本番URLを各所に登録して、2回目のデプロイ
+## 4. Vercel Blob（PDFの保管先）を作る
 
-URLが決まったので、3か所に登録する。`<本番URL>` は手順5で発行されたもの。
+プロジェクトができたので、PDFの置き場を作って接続する。
 
-### 6-1. Vercelの環境変数を直す
+1. Vercelのプロジェクト画面 → **Storage** タブ → **Create Database** → **Blob**
+2. 名前は `invoice-pdfs` など。リージョンはNeonと同じ方面を選ぶ
+3. **Connect to Project** で今のプロジェクトに接続する
+4. 接続すると `BLOB_READ_WRITE_TOKEN` が**自動で環境変数に入る**（手入力は不要）
+
+---
+
+## 5. 本番URLを各所に登録して、2回目のデプロイ
+
+URLが決まったので、3か所に登録する。`<本番URL>` は手順3で発行されたもの。
+
+### 5-1. Vercelの環境変数を直す
 
 `APP_BASE_URL` を仮の値から **`<本番URL>`** に変更する（末尾のスラッシュは付けない）。
 
-### 6-2. ログイン用のGoogle OAuth（手順4のプロジェクト）
+### 5-2. ログイン用のGoogle OAuth（手順2のプロジェクト）
 
 **認証情報 → 作成したクライアント → 承認済みのリダイレクト URI** に追加:
 
@@ -145,7 +253,7 @@ URLが決まったので、3か所に登録する。`<本番URL>` は手順5で�
 <本番URL>/api/auth/callback/google
 ```
 
-### 6-3. Gmail取り込み用のGoogle OAuth（既存のプロジェクト）
+### 5-3. Gmail取り込み用のGoogle OAuth（既存のプロジェクト）
 
 同じく**承認済みのリダイレクト URI** に追加（ローカル用の行は消さない）:
 
@@ -153,14 +261,14 @@ URLが決まったので、3か所に登録する。`<本番URL>` は手順5で�
 <本番URL>/api/gmail/callback
 ```
 
-### 6-4. 再デプロイ
+### 5-4. 再デプロイ
 
 Vercel → **Deployments** → 最新の行の「…」→ **Redeploy**。
 環境変数の変更は再デプロイしないと反映されない。
 
 ---
 
-## 7. 本番で動かして確認する
+## 6. 本番で動かして確認する
 
 `<本番URL>` を開いて、上から順に確認する。
 
@@ -178,7 +286,7 @@ Vercel → **Deployments** → 最新の行の「…」→ **Redeploy**。
 
 ---
 
-## 8. 運用を始める前に残っていること
+## 7. 運用を始める前に残っていること
 
 | 作業 | 誰が |
 |---|---|
@@ -198,8 +306,10 @@ CSVは仕様書のサンプルとバイト単位で一致させてあるが、�
 |---|---|
 | ビルドが `Environment variable not found: DATABASE_URL` で落ちる | 環境変数の Environment に `Production` のチェックが入っていない |
 | ビルドが `P1001 Can't reach database server` で落ちる | `DIRECT_URL` がプール側（`-pooler` 入り）になっている。直結のほうに直す |
-| ログインで `redirect_uri_mismatch` | 手順6-2のURIが1文字でも違う。`https`・末尾スラッシュ無し・パスまで完全一致か確認 |
-| Gmail接続で `redirect_uri_mismatch` | 手順6-3のURI、または `APP_BASE_URL` が本番URLになっていない |
+| 接続時に `channel_binding` 等のパラメータで怒られる | 接続文字列の末尾から `&channel_binding=require` を削る（`?sslmode=require` は残す） |
+| Neonの最初の1回だけ応答が遅い | 無料プランは無操作でDBが休止する（スケールtoゼロ）。次のアクセスで数秒かかるだけで異常ではない |
+| ログインで `redirect_uri_mismatch` | 手順5-2のURIが1文字でも違う。`https`・末尾スラッシュ無し・パスまで完全一致か確認 |
+| Gmail接続で `redirect_uri_mismatch` | 手順5-3のURI、または `APP_BASE_URL` が本番URLになっていない |
 | 取り込みが10秒前後で失敗する | Vercelが無料プランのまま。Proでないと `maxDuration = 300` が効かない |
 | PDFのプレビューが開けない | Blobストアがプロジェクトに接続されていない（`BLOB_READ_WRITE_TOKEN` が無い） |
 | 「読み取りに失敗しました」が全件で出る | `ANTHROPIC_API_KEY` が未設定・失効・残高切れのいずれか |
