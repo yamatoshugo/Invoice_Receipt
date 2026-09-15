@@ -255,10 +255,35 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 
 プロジェクトができたので、PDFの置き場を作って接続する。
 
-1. Vercelのプロジェクト画面 → **Storage** タブ → **Create Database** → **Blob**
+1. Vercelのプロジェクト画面 → **Storage** タブ → **Create Database**（または **Create**）→ **Blob**
 2. 名前は `invoice-pdfs` など。リージョンはNeonと同じ方面を選ぶ
 3. **Connect to Project** で今のプロジェクトに接続する
+   - 環境（Production / Preview / Development）を聞かれたら **Production** を選ぶ
 4. 接続すると `BLOB_READ_WRITE_TOKEN` が**自動で環境変数に入る**（手入力は不要）
+
+> **★環境変数名は `BLOB_READ_WRITE_TOKEN` のまま変えないこと。**
+> 接続時に「Environment Variables Prefix」を聞かれることがあるが、**空のまま**にする。
+> 接頭辞を付けると `INVOICE_PDFS_BLOB_READ_WRITE_TOKEN` のような名前になり、
+> `@vercel/blob` が既定で見る名前と合わなくなって、アップロードが動かない。
+
+### 接続したあとの確認
+
+- **Settings → Environment Variables** に `BLOB_READ_WRITE_TOKEN` が
+  追加されていること（値は伏せ字でよい）
+- **この時点ではまだ反映されていない。** 環境変数は再デプロイで初めて効く。
+  手順5の最後で再デプロイするので、ここでは追加されていることの確認だけでよい
+
+### 補足: このアプリでのBlobの使われ方
+
+| 経路 | 動き |
+|---|---|
+| ドラッグ&ドロップ | **ブラウザからBlobへ直接**アップロードする。Vercelの関数が受け取れる本文は4.5MBまでなので、サーバー経由にすると大きいPDFで失敗するため |
+| Gmail取り込み | サーバーがGmailから受け取った実体をBlobへ置く（こちらは4.5MBの制約を受けない） |
+
+保存は `access: "private"` なので、**URLを知っていても直接は開けない**。
+閲覧は必ずログイン済みのプロキシ（`/api/invoices/[id]/file`）を通る。
+PDFの上限は20MBで、同名ファイルはランダムな接尾辞を付けて別物として保存する
+（上書きで過去の請求書を壊さないため）。
 
 ---
 
