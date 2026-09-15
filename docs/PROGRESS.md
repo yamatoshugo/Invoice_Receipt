@@ -15,11 +15,65 @@
 |---|---|
 | リポジトリ | https://github.com/yamatoshugo/Invoice_Receipt （`main`、コミット6件、プッシュ済み） |
 | 動作 | ローカルで取り込み〜CSV出力まで通しで確認済み（実請求書3通） |
-| デプロイ | **未実施**。Vercel / Neon / Google OAuth / Vercel Blob はまだ何も作っていない |
+| デプロイ | **実施中**。https://invoice-receipt-sable.vercel.app が動いており、ログイン・Gmail取込・プレビューまで本番で確認済み。**Blobのトークンだけが未解決**（下記） |
 | 銀行での受入(M5) | **未実施**。本番稼働前の必須ゲート |
 | Gmail取込 | **実接続済み・実メールで取り込み確認済み**（`seikyusho@meetingtechnology.co.jp`）。添付PDFと本文リンクの両方に対応 |
 | 送付依頼メール | **実装済み・再接続済み・自分宛に実送信して確認済み**（2026-09-15）。取引先への実送信はまだ |
 | テスト | 515件（zengin 68 / vendors 22 / gmail 313 / safefetch 75 / linkpick 17 ほか） |
+
+### デプロイの現在地（2026-09-15）— ★次に開いたらここから
+
+**本番URL: https://invoice-receipt-sable.vercel.app**（固定ドメイン。デプロイ専用URLは使わない）
+
+手順は [DEPLOY.md](DEPLOY.md)。**手順0〜6のうち、Blobのトークンだけが残っている。**
+
+| 項目 | 状態 |
+|---|---|
+| 鍵2つ（`AUTH_SECRET` / `GMAIL_TOKEN_KEY`） | 済 |
+| Neon（`DATABASE_URL` / `DIRECT_URL`） | 済。マイグレーションも適用済み |
+| ログイン用 Google OAuth | 済。本番でログインできる |
+| Vercel Pro ＋ プロジェクト ＋ 1回目デプロイ | 済 |
+| リダイレクトURI登録（ログイン用・Gmail用）＋ 再デプロイ | 済 |
+| 本番での Gmail 接続・取り込み・PDFプレビュー | **確認済み** |
+| **Vercel Blob のトークン** | **未解決**。下記 |
+
+#### 未解決: `BLOB_READ_WRITE_TOKEN` が本番の実行時に見えていない
+
+症状: ドラッグ&ドロップで `Vercel Blob: No read-write token found`。
+`/api/health` でも `"BLOB_READ_WRITE_TOKEN": false`（動的参照なので誤診ではない）。
+
+**Gmail取り込みも同じトークンを使う**（`import/route.ts` の `getFileStore().put()`）ので、
+本来は両方失敗するはず。取り込みが成功していたのは**トークンが在った時点**のものと見ている。
+心当たりは、**手順3-5で環境変数を「Production限定」に編集したとき**に、
+Storage連携が自動で追加した変数が外れた可能性。
+
+**次の一手（依頼者の作業）**:
+1. Vercel → Storage → Blobストア → `vercel_blob_rw_…` の値をコピー
+2. **本番を配信しているプロジェクト**の Settings → Environment Variables に
+   `BLOB_READ_WRITE_TOKEN` を **手動で追加**（Production）
+3. 再デプロイ → `/api/health` で `true` になることを確認
+4. あわせて、Blobストアの **Connected Projects** が本番のプロジェクトかを確認
+   （同名プロジェクトが2つできていないかも見る）
+
+#### この件で足したもの・直したもの
+
+- **`/api/health`（要ログイン）** — 実行中のデプロイから何が見えているかを返す。
+  必須の環境変数の有無（★値は返さない）／本番に入ってはいけない3つの有無／
+  デプロイのコミットと環境。設定の食い違いは無関係なエラーとして現れるので、
+  切り分けの起点として残してある
+- **自前のトークン判定で処理を止めない形に修正** — 最初 `process.env.BLOB_READ_WRITE_TOKEN`
+  を静的に読んで先に弾いていたが、**この書き方はビルド時に値が埋め込まれることがあり、
+  実行時には在るのに「無い」と誤診しうる**。診断のための判定が、動くはずの経路を
+  塞いではいけない。いまは `handleUpload` に必ず試させ、失敗した「あと」に
+  手がかりとして添えるだけにしてある（判定も名前を変数で引く形に変えた）
+
+#### あとで見直すこと（急ぎではない）
+
+- **関数のリージョンが `iad1`（米国東部）。** Neonを東京に置いた場合、
+  1クエリごとに太平洋を往復する。月1回の利用なら実害は小さいが、
+  Vercel の Settings → Functions でNeonと同じ方面に寄せると速くなる
+
+---
 
 ### 現在地の棚卸し（2026-09-15）
 

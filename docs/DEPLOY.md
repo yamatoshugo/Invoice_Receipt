@@ -440,9 +440,69 @@ CSVは仕様書のサンプルとバイト単位で一致させてあるが、�
 | Gmail接続で `redirect_uri_mismatch` | 手順5-3のURI、または `APP_BASE_URL` が本番URLになっていない |
 | 取り込みが10秒前後で失敗する | Vercelが無料プランのまま。Proでないと `maxDuration = 300` が効かない |
 | PDFのプレビューが開けない | Blobストアがプロジェクトに接続されていない（`BLOB_READ_WRITE_TOKEN` が無い） |
+| `Vercel Blob: No read-write token found` | 下記「Blobのトークンが見つからないとき」 |
 | 「読み取りに失敗しました」が全件で出る | `ANTHROPIC_API_KEY` が未設定・失効・残高切れのいずれか |
 
 Preview環境（main以外のブランチをpushすると作られる）は、環境変数を Production 限定に
 してあればビルドに失敗する。
 **それで正しい。** 使いたい場合は、Neonで**別ブランチのDB**を作ってPreview用に割り当てること。
 **本番DBをPreviewに繋いではいけない。**
+
+---
+
+## 設定の食い違いを1画面で確かめる — `/api/health`
+
+原因の切り分けは、**実行中のデプロイから何が見えているか**を見るのが一番速い。
+ログインした状態で次を開く。
+
+```
+<本番URL>/api/health
+```
+
+```json
+{
+  "deployment": { "env": "production", "commit": "1a97d2b", "branch": "main" },
+  "storage": "vercel-blob",
+  "env": { "BLOB_READ_WRITE_TOKEN": false, "...": true },
+  "missing": ["BLOB_READ_WRITE_TOKEN"],
+  "unexpected": [],
+  "ok": false
+}
+```
+
+- `missing` が空、`unexpected` が空、`ok: true` なら設定は揃っている
+- **値は返さない**（設定の有無だけ）。それでもログインを必須にしてある
+- `deployment.commit` で、見ているのが最新のデプロイかどうかも分かる
+- `unexpected` に何か入っていたら、**消すまで本番で使ってはいけない**
+  （`AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR`）
+
+---
+
+## Blobのトークンが見つからないとき
+
+症状: アップロードで `Vercel Blob: No read-write token found`、
+`/api/health` で `"BLOB_READ_WRITE_TOKEN": false`。
+
+**Storage連携が自動で追加した環境変数は、手で編集すると外れることがある**
+（環境を Production 限定に絞る作業をした直後に起きやすい）。
+
+### 確実な直し方: 手動で追加する
+
+1. Vercel → **Storage** → Blobストアを開き、`vercel_blob_rw_…` で始まる値をコピー
+   （前後の引用符は含めない）
+2. **本番を配信しているプロジェクト**の **Settings → Environment Variables → Add**
+   - Key: `BLOB_READ_WRITE_TOKEN`
+   - Value: ①でコピーした値
+   - Environment: **Production**
+3. **Deployments → 一番上 → … → Redeploy**
+4. `/api/health` で `true` になったことを確認してから、アップロードを試す
+
+### あわせて確認すること
+
+- Blobストアの **Connected Projects** が、本番を配信しているプロジェクトになっているか
+- **同名のプロジェクトが2つできていないか**（最初のImportに失敗して作り直した場合など）。
+  別のプロジェクトに接続していると、いくら再デプロイしても反映されない
+
+> Gmail取り込みも**同じトークン**を使う（`getFileStore().put()`）。
+> ドラッグ&ドロップだけが失敗して取り込みは成功する、という状態は本来ありえない。
+> 取り込みが成功していたなら、それはトークンが在った時点のもの。
