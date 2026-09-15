@@ -23,18 +23,29 @@ function safeSuffix(fileName: string): string {
   return base.slice(-80) || "file.pdf";
 }
 
+/**
+ * リクエストの無い場所（Gmail取込など）から絶対URLを組み立てるためのフォールバック。
+ *
+ * リクエストがあるときは request.url のほうが厳密に正しいので、そちらを優先する。
+ * ここで作る url は Invoice.blobUrl に記録されるだけで、PDFの実取得は blobPathname 経由のため、
+ * ずれても機能は壊れない。
+ */
+function appBaseUrl(): string {
+  return process.env.APP_BASE_URL ?? "http://localhost:3000";
+}
+
 /** ローカル動作確認用の保管先。Vercel Blob の代わりにファイルシステムへ書く */
 export class LocalFileStore implements FileStore {
   readonly kind = "local" as const;
 
-  async put(fileName: string, data: Buffer, _contentType: string, baseUrl: string): Promise<StoredFile> {
+  async put(fileName: string, data: Buffer, _contentType: string, baseUrl?: string): Promise<StoredFile> {
     await mkdir(UPLOAD_DIR, { recursive: true });
     // Vercel Blob の addRandomSuffix と同じく、同名ファイルでも上書きしない
     const pathname = `${randomUUID()}-${safeSuffix(fileName)}`;
     await writeFile(path.join(UPLOAD_DIR, pathname), data);
     return {
       pathname,
-      url: new URL(`/api/uploads/${encodeURIComponent(pathname)}`, baseUrl).toString(),
+      url: new URL(`/api/uploads/${encodeURIComponent(pathname)}`, baseUrl ?? appBaseUrl()).toString(),
     };
   }
 

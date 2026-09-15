@@ -39,6 +39,10 @@ export interface InvoiceRow {
   amount: number | null;
   /** 状態を動かせるか（未処理・承認済み・除外のみ）。削除は状態によらずできる */
   changeable: boolean;
+  /** メール取込で入ったか。削除時に「メールから拾い直すか」を聞く判定に使う */
+  fromMail: boolean;
+  /** 同じPDFが再度メールで届いた記録。重複分の請求書は作らないのでここに出す */
+  duplicateArrivals: { count: number; description: string } | null;
 }
 
 const VENDOR_STATE_STYLES: Record<VendorMatchState, { label: string; className: string }> = {
@@ -118,23 +122,74 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
     run(() => bulkSetStatus(ids, status));
   }
 
-  function remove() {
-    if (selectedRows.length === 0) return;
-    const total = selectedRows.reduce((sum, r) => sum + (r.amount ?? 0), 0);
-    const exported = selectedRows.filter((r) => !r.changeable).length;
+  // 削除は window.confirm ではなくインラインの確認パネルにしている。
+  // 「メールから拾い直すか」のチェックを置く必要があり、confirm では置けないため。
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [reimportFromMail, setReimportFromMail] = useState(true);
 
-    let text = `${selectedRows.length}件を削除します（合計 ${formatYen(total)}）。\n\n一覧から消え、同じPDFを取り込み直せるようになります。この操作は取り消せません。`;
-    if (exported > 0) {
-      // 出力済みを消して取り込み直すと二重取込の防止が効かなくなるため、
-      // ここだけは何が起きるかを具体的に書く
-      text += `\n\nうち${exported}件はCSV出力済みです。銀行での振込が完了しているものを削除して取り込み直すと、二重振込になる恐れがあります。\n（CSVの出力履歴とファイルは残ります）`;
-    }
-    if (!window.confirm(text)) return;
-    run(() => deleteInvoices(selectedIds));
+  const mailSourced = selectedRows.filter((r) => r.fromMail).length;
+  const exportedCount = selectedRows.filter((r) => !r.changeable).length;
+  const selectedTotal = selectedRows.reduce((sum, r) => sum + (r.amount ?? 0), 0);
+
+  function confirmDelete() {
+    setConfirmingDelete(false);
+    run(() => deleteInvoices(selectedIds, mailSourced > 0 && reimportFromMail));
   }
 
   return (
     <div>
+      {confirmingDelete && (
+        <div className="mb-3 rounded border border-red-300 bg-red-50 px-4 py-3">
+          <p className="text-sm font-medium text-red-900">
+            {selectedRows.length}件を削除します（合計 {formatYen(selectedTotal)}）
+          </p>
+          <p className="mt-1 text-sm text-red-900">
+            一覧から消え、同じPDFを取り込み直せるようになります。この操作は取り消せません。
+          </p>
+          {exportedCount > 0 && (
+            // 出力済みを消して取り込み直すと二重取込の防止が効かなくなるため、
+            // ここだけは何が起きるかを具体的に書く
+            <p className="mt-2 text-sm text-red-900">
+              うち{exportedCount}件はCSV出力済みです。
+              銀行での振込が完了しているものを削除して取り込み直すと、二重振込になる恐れがあります。
+              （CSVの出力履歴とファイルは残ります）
+            </p>
+          )}
+
+          {mailSourced > 0 && (
+            <label className="mt-3 flex items-start gap-2 text-sm text-red-900">
+              <input
+                type="checkbox"
+                checked={reimportFromMail}
+                onChange={(e) => setReimportFromMail(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                次回の取り込みで、メールから拾い直す（{mailSourced}件がメール由来）
+                <span className="mt-0.5 block text-xs text-red-700">
+                  外すと、この添付はメールから二度と取り込まれません。
+                  やり直したいときはGmailからPDFを落として「アップロード経由」に入れてください。
+                </span>
+              </span>
+            </label>
+          )}
+
+          <div className="mt-3 flex gap-2">
+            <button type="button" className={dangerButtonClass} disabled={pending} onClick={confirmDelete}>
+              {pending ? "削除中…" : "削除する"}
+            </button>
+            <button
+              type="button"
+              className={secondaryButtonClass}
+              disabled={pending}
+              onClick={() => setConfirmingDelete(false)}
+            >
+              やめる
+            </button>
+          </div>
+        </div>
+      )}
+
       {(selectedIds.length > 0 || message) && (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-slate-200 bg-slate-50 px-4 py-3">
           {selectedIds.length > 0 ? (
@@ -169,7 +224,15 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                   </button>
                 </>
               )}
-              <button type="button" className={dangerButtonClass} disabled={pending} onClick={remove}>
+              <button
+                type="button"
+                className={dangerButtonClass}
+                disabled={pending || confirmingDelete}
+                onClick={() => {
+                  setReimportFromMail(true);
+                  setConfirmingDelete(true);
+                }}
+              >
                 削除
               </button>
               <button
@@ -240,6 +303,16 @@ export function InvoiceTable({ rows }: { rows: InvoiceRow[] }) {
                   <Link href={`/invoices/${row.id}`} className="font-medium hover:underline">
                     {row.vendorLabel}
                   </Link>
+                  {row.duplicateArrivals && (
+                    // 重複分の請求書は作らないので、「同じPDFが再度届いた」事実はここに出す。
+                    // 詳細（日時・差出人）は title で見られるようにして一覧を細くしない
+                    <span
+                      title={row.duplicateArrivals.description}
+                      className="ml-2 cursor-help rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs whitespace-nowrap text-amber-800"
+                    >
+                      メールで再送 {row.duplicateArrivals.count}回
+                    </span>
+                  )}
                   <div className="text-xs text-slate-500">{row.fileName}</div>
                 </td>
                 <td className="max-w-40 px-3 py-2">

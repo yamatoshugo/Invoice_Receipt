@@ -18,9 +18,15 @@ export interface FileStore {
 
   /**
    * ファイルを保存する。
-   * Vercel Blob 経路ではブラウザが直接アップロードするためサーバーからは呼ばない。
+   *
+   * ブラウザからの取り込みでは、Vercel Blob 経路はブラウザが直接アップロードするため
+   * サーバーからは呼ばない。Gmail取込のようにサーバー側で実体を手に入れる経路では
+   * ここから保存する。
+   *
+   * baseUrl はローカル保管時にPDF取得用の絶対URLを組み立てるためだけに使う。
+   * リクエストコンテキストが無い経路からは省略でき、その場合は APP_BASE_URL から組み立てる。
    */
-  put(fileName: string, data: Buffer, contentType: string, baseUrl: string): Promise<StoredFile>;
+  put(fileName: string, data: Buffer, contentType: string, baseUrl?: string): Promise<StoredFile>;
 
   /** 実体を取得する。存在しなければ null */
   read(pathname: string): Promise<Buffer | null>;

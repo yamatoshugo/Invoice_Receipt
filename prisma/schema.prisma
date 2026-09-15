@@ -16,6 +16,14 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// 取り込み元。既存行はすべて手動アップロードなので既定を UPLOAD にする
+enum InvoiceSource {
+  /// 画面へのドラッグ&ドロップ
+  UPLOAD
+  /// Gmail 走査からの取り込み
+  GMAIL
+}
+
 enum InvoiceStatus {
   /// 抽出直後。人の確認が済むまで必ずここに留まる
   NEEDS_REVIEW
@@ -45,6 +53,15 @@ model Invoice {
   fileSize     Int
 
   status InvoiceStatus @default(NEEDS_REVIEW)
+
+  // --- 取り込み元 ---
+  /// 既存行はすべて手動アップロードなので既定は UPLOAD
+  source          InvoiceSource @default(UPLOAD)
+  /// Gmail経路の出所。走査記録が消えても請求書側が自立するよう、すべて任意項目にしてある
+  gmailMessageId  String?
+  gmailFrom       String?
+  gmailSubject    String?
+  gmailReceivedAt DateTime?
 
   // --- 抽出値（すべて人が画面で修正できる） ---
   vendorName    String?
@@ -78,10 +95,10 @@ model Invoice {
 
   // --- 取引先マスタとの照合 ---
   /// 取り込み時に照合できた取引先。削除されても請求書は全項目を自身に持つので SetNull でよい
-  vendor   Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
-  vendorId String?
+  vendor                    Vendor?   @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  vendorId                  String?
   /// 取り込み時にマスタから補完した項目名。「何をしたか」の記録なので後から変わらない
-  vendorFilledFields String[]
+  vendorFilledFields        String[]
   /// マスタと口座が食い違うまま「この口座で振り込む」と人が確認した記録
   accountMismatchAckedAt    DateTime?
   accountMismatchAckedEmail String?
@@ -90,11 +107,13 @@ model Invoice {
   exportBatchId String?
 
   extractionRuns ExtractionRun[]
+  gmailItems     GmailItem[]
 
   @@index([status])
   @@index([dueDate])
   @@index([exportBatchId])
   @@index([vendorId])
+  @@index([source])
 }
 
 /// 支払先の口座情報。一度人が確認した値をここに集約し、次回以降の請求書に補完する。
@@ -184,5 +203,364 @@ model Setting {
   senderBranchCode    String
   senderAccountNumber String
 
+  // --- PDF送付の依頼メールのひな型 ---
+  // ★既定文面はコード側(lib/gmail/requestTemplate.ts)に置き、ここは null 可にする。
+  // @default に長い日本語を書くと、文面を直すたびにマイグレーションが要るうえ、
+  // 直す前に作られた行が古い文面を持ち続ける。null は「既定のまま」を意味する。
+  /// 件名のひな型。差し込み変数は {{元の件名}} など
+  requestMailSubject  String?
+  requestMailBody     String? @db.Text
+  /// 差出人の表示名。空なら表示名を付けずアドレスだけで送る
+  requestMailFromName String?
+
   updatedByEmail String?
+}
+
+// ===========================================================================
+// Gmail 取込
+//
+// 第1段は「PDFが直接添付されたメール」だけを扱う。
+// 第2段で本文中のURL（PDF直リンク／要ログイン）を足すが、状態・決着判定・再試行・
+// 未決着の集計はすべて GmailItem を共有するので、テーブルの作り直しは起きない。
+// ===========================================================================
+
+/// 請求書受け取り専用Gmailアカウントの接続情報。
+///
+/// 「アプリに誰がログインしているか」とは独立した、システムが持つ1つの接続。
+/// これにより、誰がログインしていてもボタン一つで同じ受信箱を読める。
+/// Setting と同じくシングルトン行。
+model GmailConnection {
+  id        String   @id @default("default")
+  updatedAt DateTime @updatedAt
+
+  /// 接続したGmailアドレス。token交換直後に users.getProfile で実物を確認して入れる
+  emailAddress String
+  /// Googleが実際に許可したスコープ。要求どおりかを接続時に検証し、記録も残す
+  scope        String
+
+  /// refresh_token を AES-256-GCM で暗号化したもの。平文は絶対に置かない。
+  /// 鍵は環境変数(GMAIL_TOKEN_KEY)、暗号文はDBに置くことで信頼境界を分ける。
+  /// 形式: "v1.<iv>.<tag>.<ciphertext>"（各 base64url）
+  refreshTokenCipher String
+
+  connectedAt      DateTime @default(now())
+  /// 誰がこの権限を持ち込んだかの記録
+  connectedByEmail String
+
+  lastSyncedAt  DateTime?
+  /// 直近の失敗理由。invalid_grant はここに入れて設定画面に出す
+  lastSyncError String?
+}
+
+enum GmailScanState {
+  /// ページングの途中。ここに留まる限り「その期間は走査済み」と名乗ってはいけない
+  RUNNING
+  /// nextPageToken が尽きた。この状態の期間だけが「走査済み」
+  COMPLETED
+  /// トークン失効・APIエラー等で中断。再開できる
+  FAILED
+  /// 人が明示的に破棄した。走査済みには数えない
+  ABANDONED
+}
+
+/// 期間を指定して Gmail を走査した1回分の記録。
+///
+/// 「いつ・誰が・どの期間を・どこまで見たか」の監査記録であり、
+/// state が COMPLETED の行の期間だけを「走査済み」とみなす。
+/// 中断した走査を走査済みに数えると、そこが恒久的な抜け洩れになる。
+model GmailScan {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// 走査したGmailアカウント。将来アドレスが変わっても記録がずれないように残す
+  mailboxAddress String
+
+  /// 期間の下限（この瞬間を含む）。半開区間 [windowFrom, windowTo) なので
+  /// 隣接する走査に重なりも隙間も生じない
+  windowFrom DateTime
+  /// 期間の上限（この瞬間を含まない）。走査開始時に固定し、途中で「今」に伸ばさない。
+  /// 伸ばすとページングの途中で新着が先頭に挿入され、境界が1通ずれて落ちる
+  windowTo   DateTime
+
+  /// Gmailに実際に投げた検索クエリ。画面にそのまま出して人がGmailで再現できるようにする
+  query String
+
+  state GmailScanState @default(RUNNING)
+
+  /// 次のページのトークン。null かつ COMPLETED なら走査しきった証拠
+  pageToken String?
+  pageCount Int     @default(0)
+
+  // --- 件数。すべて実際に数えた値を入れる。resultSizeEstimate は不正確なので使わない ---
+  /// クエリが返したメッセージIDの総数（マージン分を含む）。Gmailの検索結果と突き合わせる値
+  listedMessageCount   Int @default(0)
+  /// うち internalDate が期間内だったメール件数
+  inWindowMessageCount Int @default(0)
+  /// 期間内メールのスレッドの異なり数。Gmailの画面はスレッド単位で数えるため必要
+  inWindowThreadCount  Int @default(0)
+  /// 見つかった取り込み候補の総数
+  itemCount            Int @default(0)
+  /// うちこの走査で初めて見つかった候補の数
+  newItemCount         Int @default(0)
+
+  startedByEmail String
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  /// 中断した理由。画面にそのまま出す
+  error          String?
+
+  messages GmailMessage[]
+
+  @@index([state])
+  @@index([windowFrom])
+}
+
+/// 走査で見た1通のメール。添付が無いメールも必ず行を作る。
+///
+/// 行が無いと「添付が無かった」のか「見落とした」のかが後から区別できない。
+/// さらに、添付が無いメールこそ第2段でURL請求書の候補になるため、
+/// ここに全メールが揃っていることが第2段の前提にもなる。
+model GmailMessage {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// 再走査で二重に行を作らないための一意制約
+  gmailMessageId String @unique
+  gmailThreadId  String
+
+  /// Gmailが記録した受信時刻(internalDate)。期間内かどうかの判定はこの値だけで行い、
+  /// 検索演算子のタイムゾーン解釈には依存しない
+  internalDate DateTime
+
+  fromRaw     String
+  /// 第2段の「PDF送付をお願いするメール」の宛先になる
+  fromAddress String?
+  fromName    String?
+  subject     String?
+
+  /// メールに付いていたGmailラベル。SPAM / TRASH を画面で区別するために保持する
+  labelIds String[]
+
+  /// このメールの添付を調べ終えた時刻。
+  ///
+  /// メールの決着は「有効な調べ方をすべて終えたか」で判定する。
+  attachmentsScannedAt DateTime?
+
+  /// 添付（filenameを持つパート）の件数。0 なら「添付なし」として集計に出す
+  attachmentCount Int @default(0)
+
+  /// このメールの本文リンクを調べ終えた時刻。attachmentsScannedAt と対になる。
+  ///
+  /// この列を足した時点で既存の全メールが NULL ＝ 未走査になり、
+  /// 同じ期間をもう一度走査するだけで対象になる。
+  /// 遡って書き換えるスクリプトを書いてはいけない（「調べていない」が事実）。
+  linksScannedAt DateTime?
+
+  /// 本文から取り出した http(s) URL の件数。0 なら LINK 候補の行は作らない。
+  /// 本文の実体が別取得になっていて数えられなかった場合は -1 を入れ、
+  /// 「リンクがあるかもしれない」側に倒して候補行を作る
+  linkCandidateCount Int @default(0)
+
+  /// 最初に見つけた走査。再走査ではこの参照を書き換えない
+  scan   GmailScan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  scanId String
+
+  items GmailItem[]
+
+  @@index([internalDate])
+  @@index([scanId])
+  /// 「リンクをまだ調べていないメール」を期間で引くため
+  @@index([linksScannedAt])
+}
+
+/// 取り込み候補の種類
+enum GmailItemKind {
+  /// メールに直接添付されたファイル
+  ATTACHMENT
+  /// 本文中のURL。メール1通につき1行（ref = "body"）。
+  ///
+  /// どのURLが請求書かは取り込み時にLLMで判定するので、走査時点では
+  /// 「本文のリンクを調べる」という1件の作業としてしか行を作れない。
+  /// URLごとに行を作ると、配信停止リンクにも PENDING の行ができて
+  /// 取り込みループが実際に叩きに行ってしまう。
+  /// 実際に取得を試みたURLは url 列に残す。
+  LINK
+}
+
+/// LINK候補について、LLMが本文から判定したリンクの性質
+enum GmailLinkKind {
+  /// PDFに直接つながると判定した
+  PDF
+  /// 見るにはログインが必要と判定した。取引先にPDF送付を依頼する
+  LOGIN
+  /// 請求書のリンクではないと判定した（配信停止・広告・会社サイト等）
+  OTHER
+}
+
+enum GmailItemStatus {
+  /// 未処理。取り込みボタンの対象
+  PENDING
+  /// 取り込み処理中（別タブとの二重実行を防ぐための占有）
+  IMPORTING
+  /// 取り込み済み。invoiceId に請求書がある
+  IMPORTED
+  /// 同じ内容のPDFが既に取り込まれていた（sha256一致）。invoiceId は既存の請求書
+  DUPLICATE
+  /// PDF以外（画像・Excel・zip など）
+  NOT_PDF
+  /// PDFだが開けない。パスワード付き・破損
+  UNREADABLE
+  /// 上限サイズを超えていて保管できない
+  TOO_LARGE
+  /// 取得・保存・読み取りのいずれかでエラー。再試行できる
+  FAILED
+  /// ログインが要るURLだった。請求書はまだ手元に無いので決着ではない。
+  /// 取引先にPDF送付を依頼する（＝依頼メールの送信対象）
+  LOGIN_REQUIRED
+
+  /// 依頼メールを送信中。二重送信を防ぐための占有（IMPORTING と同じ役割）。
+  /// 送信APIの応答が返る前に落ちるとこの状態で残るので、決着にはしない
+  REQUEST_SENDING
+  /// 送付依頼メールを送った。返信待ち。
+  /// ★これ単体を決着にしてはいけない（返信が来て初めて決着。status.ts を見ること）
+  REQUEST_SENT
+  /// 依頼メールの送信でエラーになった。★自動では再送しない。
+  /// Gmailの送信済みを人が確認してから操作する
+  REQUEST_FAILED
+}
+
+/// 取り込み候補。取り込みの作業単位であり、状態の器。行が消えることはない。
+///
+/// 第1段では kind = ATTACHMENT のみが作られる。第2段で LINK が加わるが、
+/// 状態・決着判定・再試行・未決着バナー・突合サマリはすべてこのテーブルを共有する。
+///
+/// 「どの行も必ず決着している」ことを画面が証明できるよう、
+/// IMPORTED / DUPLICATE 以外はすべて人の確認(acknowledgedAt)か再試行を要求する。
+model GmailItem {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  message   GmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId String
+
+  kind GmailItemKind
+
+  /// 同じメール内で候補を一意に指す値。
+  /// ATTACHMENT なら MIME構造から決まるパートの位置（"1" / "2.1" / "2.1.1"）、
+  /// 第2段の LINK なら正規化したURL。
+  /// attachmentId はリクエストごとに変わりうるので一意キーには使わない
+  ref String
+
+  // --- ATTACHMENT 固有 ---
+  /// 取得用のID。走査時点の値。取り込み時には必ず messages.get で取り直す
+  attachmentId String?
+  fileName     String?
+  mimeType     String?
+  /// Content-Disposition。inline の画像（署名ロゴ等）を本文添付と区別する
+  disposition  String?
+  /// Gmailが申告したサイズ（バイト）。実体の長さは取り込み時に測り直す
+  size         Int?
+
+  // --- LINK 固有 ---
+  /// 実際に取得を試みた（またはログインが必要と判定した）URL。原文のまま入れる。
+  /// 正規化した値は入れない。署名付きURLはクエリを1文字触ると壊れる
+  url String?
+
+  /// LLMがこのURLをどう見たか。判定前は null
+  linkKind GmailLinkKind?
+
+  /// LLMが見たリンクの件数。判定の妥当性を後から確かめるための記録
+  linkCandidateCount Int?
+
+  /// LLMの確信度 0.0〜1.0。表示と記録のためだけに使い、取得の可否は判定しない
+  /// （実際に叩いた結果のほうが、モデルの自己申告より強い証拠になる）
+  linkConfidence Float?
+
+  status   GmailItemStatus @default(PENDING)
+  /// 状態の理由を日本語で。画面にそのまま出す
+  message_ String?         @map("message")
+
+  /// 取り込みで作られた（または重複先の）請求書。
+  ///
+  /// 請求書を削除しても行は残す。Cascade にすると行ごと消えて、
+  /// 再走査で黙って取り込み直されるため、必ず SetNull にすること。
+  /// SetNull なら「取り込んだはずの請求書が無い」として未決着に戻り、画面に出る。
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  invoiceId String?
+
+  /// 取り込まないと人が判断した記録。PDF以外・破損・請求書でないPDF に付ける
+  acknowledgedAt    DateTime?
+  acknowledgedEmail String?
+  acknowledgeReason String?
+
+  /// 署名画像など、本文装飾として自動的に脇へ寄せたもの。
+  /// 件数は必ず画面に出すが、人の確認を求めない唯一の例外
+  autoSkipped Boolean @default(false)
+
+  /// 取り込みを試みた回数。何度も失敗する行を炙り出す
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime?
+
+  // --- PDF送付の依頼メール（LINK かつ LOGIN_REQUIRED の行だけが対象） ---
+  // 送った内容そのものは GmailRequestMail に残す。ここに持つのは一覧・集計で
+  // 毎回結合しなくて済むようにするための写しだけ。
+  /// 依頼メールを実際に送った時刻。返信待ちの経過日数はここから数える
+  requestSentAt        DateTime?
+  /// 実際に送った宛先。後から取引先の窓口を確かめるために残す
+  requestToAddress     String?
+  /// 送信を試みた回数。★自動再試行はしない。人が押した回数
+  requestAttemptCount  Int       @default(0)
+  lastRequestAttemptAt DateTime?
+  /// 直近の送信失敗の理由。画面にそのまま出す
+  requestError         String?
+
+  requestMails GmailRequestMail[]
+
+  /// 再走査で同じ候補が二重に行を作らないための要。
+  /// ref は MIME構造（第2段ではURL）由来なので、走査をまたいで安定している
+  @@unique([messageId, kind, ref])
+  @@index([status])
+  @@index([invoiceId])
+}
+
+/// 送った依頼メールの控え。1回の送信につき1行で、成功も失敗も残す。
+///
+/// ★ひな型ではなく「実際に送った最終形」を保存する。
+/// ひな型しか残さないと、後からひな型を直した瞬間に
+/// 「あのとき何を送ったか」が永久に分からなくなる。
+///
+/// 失敗した行も消さない。送信APIがタイムアウトした場合、
+/// 「送れたか分からない」こと自体が人に必要な情報になる。
+model GmailRequestMail {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  /// 候補を消したらこの控えも消える。候補の行自体は消えない設計なので実質残る
+  item   GmailItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  itemId String
+
+  fromAddress String
+  toAddress   String
+
+  subject String
+  body    String @db.Text
+
+  /// 返信として送ったスレッド。null なら新規メールとして送った。
+  /// Gmailは件名が一致しないとスレッドに入れないので、常に返信になるとは限らない
+  threadedTo String?
+
+  /// Gmailが採番した送信済みメールのID。次の走査で自分の送信控えを識別するのにも使う
+  sentGmailMessageId String?
+  sentGmailThreadId  String?
+  sentAt             DateTime?
+  sentByEmail        String
+
+  /// 失敗理由。null なら成功
+  error String?
+
+  @@index([itemId])
+  @@index([toAddress])
 }

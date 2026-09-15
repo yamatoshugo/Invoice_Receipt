@@ -1,11 +1,7 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { auth } from "@/auth";
-import { prisma } from "@/lib/prisma";
-import { getInvoiceExtractor } from "@/lib/extraction";
 import { getFileStore } from "@/lib/storage";
-import { digitsOnly, parseIsoDate } from "@/lib/invoices";
-import { describeMatch, fillFromVendor, matchVendor } from "@/lib/vendors";
+import { ingestPdf } from "@/lib/ingest";
 
 // LLMでの読み取りに数十秒かかるため、実行時間の上限を引き上げる（Vercel Proが必要）
 export const maxDuration = 300;
@@ -20,8 +16,8 @@ const BodySchema = z.object({
 /**
  * ブラウザがBlobへ上げ終わったPDFを取り込み、読み取りまで行う。
  *
- * SHA-256はクライアントの申告を信用せず、必ずサーバーが実体から計算する。
- * ここの一意制約が同じ請求書の二重取込＝二重振込を防ぐ最後の砦になるため。
+ * 取り込みの中身は ingestPdf() にある（Gmail取込と共通）。
+ * ここは実体の取り出しと、結果をHTTPに写すことだけを行う。
  */
 export async function POST(request: Request): Promise<Response> {
   const session = await auth();
@@ -34,7 +30,6 @@ export async function POST(request: Request): Promise<Response> {
   }
   const { pathname, url, fileName, size } = parsed.data;
 
-  // --- 実体を取得してハッシュを計算 ---
   const store = getFileStore();
   let pdf: Buffer;
   try {
@@ -45,96 +40,26 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "アップロードしたファイルを読み込めませんでした" }, { status: 400 });
   }
 
-  const sha256 = createHash("sha256").update(pdf).digest("hex");
-
-  const duplicate = await prisma.invoice.findUnique({
-    where: { sha256 },
-    select: { id: true, fileName: true, createdAt: true },
+  const result = await ingestPdf({
+    pdf,
+    fileName,
+    stored: { pathname, url },
+    fileSize: size,
+    origin: { source: "UPLOAD" },
   });
-  if (duplicate) {
-    // 重複分のファイルは残さない
-    await store.delete(pathname).catch(() => {});
-    return Response.json(
-      {
-        error: "duplicate",
-        message: `同じ内容のPDFが既に取り込まれています（${duplicate.fileName}）`,
-        existingId: duplicate.id,
-      },
-      { status: 409 },
-    );
+
+  switch (result.kind) {
+    case "duplicate":
+      return Response.json(
+        { error: "duplicate", message: result.message, existingId: result.existingId },
+        { status: 409 },
+      );
+    case "extraction_failed":
+      return Response.json(
+        { invoice: result.invoice, extracted: false, error: result.error },
+        { status: 201 },
+      );
+    case "created":
+      return Response.json({ invoice: result.invoice, extracted: true }, { status: 201 });
   }
-
-  const invoice = await prisma.invoice.create({
-    data: {
-      fileName,
-      blobUrl: url,
-      blobPathname: pathname,
-      sha256,
-      fileSize: size,
-      status: "NEEDS_REVIEW",
-    },
-  });
-
-  // --- 読み取り ---
-  const result = await getInvoiceExtractor().extract(pdf, fileName);
-
-  await prisma.extractionRun.create({
-    data: {
-      invoiceId: invoice.id,
-      model: result.meta.model,
-      promptVersion: result.meta.promptVersion,
-      inputTokens: result.meta.inputTokens,
-      outputTokens: result.meta.outputTokens,
-      latencyMs: result.meta.latencyMs,
-      rawResponse: result.ok ? (result.data as object) : undefined,
-      error: result.ok ? undefined : result.error,
-    },
-  });
-
-  if (!result.ok) {
-    const failed = await prisma.invoice.update({
-      where: { id: invoice.id },
-      data: { status: "EXTRACTION_FAILED", extractionError: result.error },
-    });
-    return Response.json({ invoice: failed, extracted: false, error: result.error }, { status: 201 });
-  }
-
-  const d = result.data;
-
-  // --- 取引先マスタとの照合 ---
-  // 読み取った値をそのまま材料にして、空欄の項目だけをマスタから埋める。
-  // 更新は下の1回にまとめ、途中で失敗して中途半端な状態が残らないようにする。
-  const extracted = {
-    vendorName: d.vendorName,
-    bankCode: digitsOnly(d.bankCode),
-    bankName: d.bankName,
-    branchCode: digitsOnly(d.branchCode),
-    branchName: d.branchName,
-    accountType: d.accountType,
-    accountNumber: digitsOnly(d.accountNumber),
-    recipientName: d.recipientName,
-  };
-  const match = matchVendor(extracted, await prisma.vendor.findMany());
-  const filled = fillFromVendor(match);
-  const matchNote = describeMatch(match, extracted);
-
-  const updated = await prisma.invoice.update({
-    where: { id: invoice.id },
-    data: {
-      ...extracted,
-      ...filled,
-      invoiceNumber: d.invoiceNumber,
-      issueDate: parseIsoDate(d.issueDate),
-      dueDate: parseIsoDate(d.dueDate),
-      billedAmount: d.billedAmount,
-      confidence: d.confidence,
-      // 読み取りのメモは消さず、マスタ照合の結果を後ろに足す
-      note: [d.notes, matchNote].filter(Boolean).join("\n") || null,
-      vendorId: match.vendor?.id ?? null,
-      vendorFilledFields: match.fillable.filter((f) => f in filled),
-      status: "NEEDS_REVIEW",
-    },
-  });
-
-  return Response.json({ invoice: updated, extracted: true }, { status: 201 });
 }

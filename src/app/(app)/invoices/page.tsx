@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { InvoiceStatus } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 import { effectiveAmount, formatDate, formatYen, STATUS_LABELS } from "@/lib/invoices";
+import { describeDuplicateArrival, summarizeDuplicateArrivals } from "@/lib/gmail/duplicates";
 import { matchVendor } from "@/lib/vendors";
 import { toZenginKana } from "@/lib/zengin/kana";
 import { InvoiceTable, type InvoiceRow } from "./InvoiceTable";
@@ -34,14 +35,35 @@ export default async function InvoicesPage({
 
   const total = invoices.reduce((sum, i) => sum + (effectiveAmount(i) ?? 0), 0);
 
+  // 同じPDFが再度メールで届いた記録。重複分の請求書は作らないので、
+  // 「2回届いた」という事実は既存の請求書の行に出す。
+  const duplicates = summarizeDuplicateArrivals(
+    (
+      await prisma.gmailItem.findMany({
+        where: { status: "DUPLICATE", invoiceId: { in: invoices.map((i) => i.id) } },
+        include: { message: { select: { internalDate: true, fromAddress: true, subject: true } } },
+      })
+    ).map((item) => ({
+      invoiceId: item.invoiceId,
+      receivedAt: item.message.internalDate,
+      fromAddress: item.message.fromAddress,
+      subject: item.message.subject,
+    })),
+  );
+
   // 表示に必要な値はここで組み立てる。半角カナ変換や金額整形はサーバー側に残し、
   // クライアントには選択と一括操作だけを持たせる。
   const rows: InvoiceRow[] = invoices.map((invoice) => {
     const kana = invoice.recipientName ? toZenginKana(invoice.recipientName) : null;
     const match = matchVendor(invoice, vendors);
+    const duplicate = duplicates.get(invoice.id);
     return {
       id: invoice.id,
       status: invoice.status,
+      fromMail: invoice.source === "GMAIL",
+      duplicateArrivals: duplicate
+        ? { count: duplicate.count, description: describeDuplicateArrival(duplicate) }
+        : null,
       vendorLabel: invoice.vendorName ?? invoice.fileName,
       fileName: invoice.fileName,
       bankLine: invoice.bankCode

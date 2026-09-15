@@ -6,6 +6,8 @@ import type { Invoice, InvoiceStatus, Vendor } from "@/generated/prisma";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getFileStore } from "@/lib/storage";
+import { disconnect as disconnectGmailConnection } from "@/lib/gmail/connection";
+import { sendRequestMail, skipRequest } from "@/lib/gmail/requests";
 import { digitsOnly, parseIsoDate } from "@/lib/invoices";
 import {
   describeMatch,
@@ -218,8 +220,17 @@ export async function bulkSetStatus(
  * CSVの出力履歴（件数・合計・生成したCSVの実体）は ExportBatch に残るので、
  * 銀行へ何を送ったかの記録は請求書を消しても失われない。
  */
-export async function deleteInvoices(invoiceIds: string[]): Promise<ActionState> {
-  await requireEmail();
+export async function deleteInvoices(
+  invoiceIds: string[],
+  /**
+   * Gmail由来の請求書を、次回の取り込みでメールから拾い直すか。
+   *
+   * 再走査で勝手に復活はさせない方針なので、削除する瞬間に人が選ぶ。
+   * 既存の呼び出しを壊さないよう既定値を置いてある。
+   */
+  reimportFromMail = false,
+): Promise<ActionState> {
+  const email = await requireEmail();
   if (invoiceIds.length === 0) return { ok: false, message: "対象が選択されていません" };
 
   const targets = await prisma.invoice.findMany({
@@ -228,9 +239,38 @@ export async function deleteInvoices(invoiceIds: string[]): Promise<ActionState>
   });
   if (targets.length === 0) return { ok: false, message: "対象が見つかりません" };
 
+  // GmailItem.invoiceId は onDelete: SetNull なので、請求書を消すと紐づけが消える。
+  // 先に引いておかないと、どの添付が対象だったか分からなくなる。
+  const mailItems = await prisma.gmailItem.findMany({
+    where: { invoiceId: { in: targets.map((t) => t.id) } },
+    select: { id: true },
+  });
+
   const { count } = await prisma.invoice.deleteMany({
     where: { id: { in: targets.map((t) => t.id) } },
   });
+
+  if (mailItems.length > 0) {
+    const ids = mailItems.map((i) => i.id);
+    if (reimportFromMail) {
+      // 次の取り込みで自動的に拾われる
+      await prisma.gmailItem.updateMany({
+        where: { id: { in: ids } },
+        data: { status: "PENDING", message_: null, acknowledgedAt: null, acknowledgedEmail: null },
+      });
+    } else {
+      // 「取り込み直さない」と人が決めた記録。これが無いと、請求書の無い取り込み済みとして
+      // いつまでも未処理あつかいで残り続ける
+      await prisma.gmailItem.updateMany({
+        where: { id: { in: ids } },
+        data: {
+          acknowledgedAt: new Date(),
+          acknowledgedEmail: email,
+          acknowledgeReason: "請求書を削除（メールから取り込み直さない）",
+        },
+      });
+    }
+  }
 
   // PDFの実体も片付ける。DBから消した後なので、失敗しても不整合にはならない
   const store = getFileStore();
@@ -238,7 +278,136 @@ export async function deleteInvoices(invoiceIds: string[]): Promise<ActionState>
 
   revalidatePath("/invoices");
   revalidatePath("/export");
-  return { ok: true, message: `${count}件を削除しました。同じPDFを取り込み直せます` };
+  revalidatePath("/upload");
+
+  const mailNote =
+    mailItems.length === 0
+      ? ""
+      : reimportFromMail
+        ? `。${mailItems.length}件は次回の取り込みでメールから拾い直します`
+        : `。${mailItems.length}件はメールから取り込み直しません`;
+  return { ok: true, message: `${count}件を削除しました。同じPDFを取り込み直せます${mailNote}` };
+}
+
+/** 削除の確認に「メールから拾い直す」を出すかどうかの判定に使う */
+export async function countMailSourcedInvoices(invoiceIds: string[]): Promise<number> {
+  await requireEmail();
+  if (invoiceIds.length === 0) return 0;
+  return prisma.invoice.count({ where: { id: { in: invoiceIds }, source: "GMAIL" } });
+}
+
+// --- Gmail取込 -------------------------------------------------------------
+
+/**
+ * 中断した走査を破棄する。
+ *
+ * 破棄しても「走査済み」にはならない。その期間は未走査のまま残り、
+ * 走査済み期間の帯に隙間として出続ける。
+ */
+export async function abandonGmailScan(scanId: string): Promise<ActionState> {
+  await requireEmail();
+
+  const scan = await prisma.gmailScan.findUnique({ where: { id: scanId }, select: { state: true } });
+  if (!scan) return { ok: false, message: "対象が見つかりません" };
+  if (scan.state === "COMPLETED") return { ok: false, message: "完了した走査は破棄できません" };
+
+  await prisma.gmailScan.update({
+    where: { id: scanId },
+    data: { state: "ABANDONED", finishedAt: new Date() },
+  });
+
+  revalidatePath("/upload");
+  return { ok: true, message: "走査を破棄しました。この期間は未走査のまま残ります" };
+}
+
+/** Gmailの連携を解除する。Google側のトークンも無効化する */
+export async function disconnectGmail(): Promise<ActionState> {
+  await requireEmail();
+  await disconnectGmailConnection();
+
+  revalidatePath("/settings");
+  revalidatePath("/upload");
+  return { ok: true, message: "Gmailの連携を解除しました" };
+}
+
+// ===== PDF送付の依頼メール =====
+
+/**
+ * 依頼メールを1通送る。
+ *
+ * ★一括送信は作らない。各社で宛名も元の件名も違うので「同じ内容を30通」の実体が無く、
+ * 一括送信は「テンプレートの書き間違いが全社に同時に届く」唯一の経路になる。
+ */
+export async function sendGmailRequest(
+  itemId: string,
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const email = await requireEmail();
+
+  const result = await sendRequestMail({
+    itemId,
+    to: String(formData.get("to") ?? ""),
+    subject: String(formData.get("subject") ?? ""),
+    body: String(formData.get("body") ?? ""),
+    actorEmail: email,
+  });
+
+  revalidatePath("/upload/requests");
+  revalidatePath("/upload");
+  return result;
+}
+
+/** 「依頼しない」。決着させる唯一の手動経路 */
+export async function skipGmailRequest(itemId: string, reason: string): Promise<ActionState> {
+  const email = await requireEmail();
+  const result = await skipRequest({ itemId, actorEmail: email, reason });
+
+  revalidatePath("/upload/requests");
+  revalidatePath("/upload");
+  return result;
+}
+
+const RequestMailSchema = z.object({
+  requestMailSubject: z.string().trim().min(1, "件名のひな型を入力してください").max(200),
+  requestMailBody: z.string().trim().min(1, "本文のひな型を入力してください").max(5000),
+  requestMailFromName: z.string().trim().max(100),
+});
+
+/**
+ * 依頼メールのひな型を保存する。
+ *
+ * 振込設定（saveSettings）とは別のフォームにしてある。
+ * 金銭事故に直結する銀行の設定と、文面の推敲を同じ保存ボタンに載せない。
+ */
+export async function saveRequestMailTemplate(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const email = await requireEmail();
+
+  const parsed = RequestMailSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) {
+    return { ok: false, message: parsed.error.issues.map((i) => i.message).join(" / ") };
+  }
+  const data = {
+    requestMailSubject: parsed.data.requestMailSubject,
+    requestMailBody: parsed.data.requestMailBody,
+    requestMailFromName: parsed.data.requestMailFromName || null,
+  };
+
+  const existing = await prisma.setting.findUnique({ where: { id: "default" } });
+  if (!existing) {
+    return { ok: false, message: "先に振込依頼人の設定を保存してください" };
+  }
+  await prisma.setting.update({
+    where: { id: "default" },
+    data: { ...data, updatedByEmail: email },
+  });
+
+  revalidatePath("/settings");
+  revalidatePath("/upload/requests");
+  return { ok: true, message: "文面を保存しました" };
 }
 
 /** 一覧のフォームから呼ぶための薄いラッパー */
