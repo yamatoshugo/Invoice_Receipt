@@ -54,11 +54,12 @@ type ItemForSettlement = Omit<ItemLike, "repliedAt"> & {
 export async function attachReplies<T extends ItemForSettlement>(
   items: T[],
   mailboxAddress: string,
+  preloaded?: ThreadMessageLike[],
 ): Promise<(T & { repliedAt: Date | null })[]> {
   const waiting = items.filter((i) => i.status === "REQUEST_SENT" && i.requestSentAt !== null);
   if (waiting.length === 0) return items.map((i) => ({ ...i, repliedAt: null }));
 
-  const messages = await threadMessagesSince(waiting);
+  const messages = preloaded ?? (await threadMessagesSince(waiting));
 
   return items.map((item) => ({
     ...item,
@@ -74,7 +75,13 @@ export async function attachReplies<T extends ItemForSettlement>(
   }));
 }
 
-/** 依頼を送ったスレッドの、送信後に届いたメールだけを読む */
+/**
+ * 依頼を送ったスレッドの、送信後に届いたメールだけを読む。
+ *
+ * 返信の有無（attachReplies）と、添付なし返信の抽出（noAttachmentReplyMap）が
+ * 同じ待ち行列を材料にするので、同じ結果を2回引かないよう
+ * 呼び出し側が1回引いて両方へ渡せるようにしてある（preloaded 引数）。
+ */
 async function threadMessagesSince(
   waiting: { requestSentAt: Date | null; message: { gmailThreadId: string } }[],
 ): Promise<ThreadMessageLike[]> {
@@ -263,6 +270,11 @@ export async function loadRequestQueue(context: RequestContext): Promise<Request
     },
   });
 
+  // 返信の有無と「添付なし返信」は、同じ待ち行列の同じメールから判定する。
+  // 別々に引くと同一のクエリが1画面で2回飛ぶので、ここで1回だけ読んで両方へ渡す。
+  const waitingRows = rows.filter((r) => r.status === "REQUEST_SENT" && r.requestSentAt !== null);
+  const threadMessages = waitingRows.length > 0 ? await threadMessagesSince(waitingRows) : [];
+
   const withReplies = await attachReplies(
     rows.map((r) => ({
       ...r,
@@ -272,10 +284,11 @@ export async function loadRequestQueue(context: RequestContext): Promise<Request
       autoSkipped: false,
     })),
     context.mailboxAddress,
+    threadMessages,
   );
 
   // 添付なしの返信（「承知しました」だけ）は決着にしないが、画面では区別して出す
-  const noAttachmentReplies = await noAttachmentReplyMap(rows, context.mailboxAddress);
+  const noAttachmentReplies = await noAttachmentReplyMap(rows, context.mailboxAddress, threadMessages);
   const recent = await recentlySentMap(rows.map((r) => r.message.fromAddress), context.now);
 
   const queue: RequestQueue = { unsent: [], waiting: [] };
@@ -336,12 +349,13 @@ function vendorNameOf(fromName: string | null, fromAddress: string | null): stri
 async function noAttachmentReplyMap(
   rows: { id: string; status: string; requestSentAt: Date | null; message: { gmailThreadId: string } }[],
   mailboxAddress: string,
+  preloaded?: ThreadMessageLike[],
 ): Promise<Map<string, Date>> {
   const waiting = rows.filter((r) => r.status === "REQUEST_SENT" && r.requestSentAt !== null);
   const map = new Map<string, Date>();
   if (waiting.length === 0) return map;
 
-  const messages = await threadMessagesSince(waiting);
+  const messages = preloaded ?? (await threadMessagesSince(waiting));
   for (const row of waiting) {
     const at = replyWithoutAttachmentAt({
       threadId: row.message.gmailThreadId,

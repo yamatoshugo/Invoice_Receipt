@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import { abandonGmailScan } from "@/app/actions";
 import { buttonClass, ErrorBox, Field, inputClass, secondaryButtonClass } from "@/components/ui";
+import { IMPORT_CONCURRENCY } from "@/lib/importConcurrency";
+import { mapWithConcurrency } from "@/lib/concurrency";
 
 interface InterruptedScan {
   id: string;
@@ -27,9 +29,13 @@ interface Pending {
 /**
  * 走査と取り込みを続けて実行する。
  *
- * 内部では2段階（メールを数え上げる走査 → 1件ずつの取り込み）だが、
- * 画面上はボタン1つ。取り込みは1リクエスト1件で、既存のドラッグ&ドロップと同じく
- * 1件ずつ順に処理する。まとめて投げるとサーバー側で詰まり、進捗も分からなくなる。
+ * 内部では2段階（メールを数え上げる走査 → 候補の取り込み）だが、画面上はボタン1つ。
+ *
+ * ★取り込みは「1リクエストにつき候補1件」を必ず守る。読み取りに数十秒かかるので、
+ * 1リクエストに複数件を詰め込むと実行時間の上限を超え、進捗も分からなくなる。
+ * これは守ったうえで、独立したリクエストを数本だけ同時に走らせる。
+ * サーバー側から見れば1件ずつの取り込みが数本来ているだけで、
+ * 1回の関数実行の長さは変わらない（＝実行時間の上限には影響しない）。
  */
 export function GmailPanel({
   defaults,
@@ -81,7 +87,7 @@ export function GmailPanel({
     [],
   );
 
-  /** 未処理の候補を1件ずつ取り込む。1件失敗しても残りは続ける */
+  /** 未処理の候補を取り込む。1件失敗しても残りは続ける */
   const runImport = useCallback(async (scanId: string) => {
     const res = await fetch(`/api/gmail/pending?scan=${encodeURIComponent(scanId)}`);
     const data = await res.json();
@@ -93,16 +99,19 @@ export function GmailPanel({
       return;
     }
 
-    for (let i = 0; i < pending.length; i += 1) {
-      const item = pending[i]!;
-      setProgress(`読み取り中… ${i + 1} / ${pending.length}件目（${item.label}）`);
+    let done = 0;
+    await mapWithConcurrency(pending, IMPORT_CONCURRENCY, async (item) => {
       try {
         await fetch(`/api/gmail/items/${encodeURIComponent(item.id)}/import`, { method: "POST" });
       } catch {
         // 1件の失敗で残りを止めない。失敗はサーバー側で FAILED として記録され、
         // 未決着のまま画面に残るので取りこぼしにはならない
       }
-    }
+      // 順不同で終わるので「N件目」ではなく終わった数を出す
+      done += 1;
+      setProgress(`読み取り中… 完了 ${done} / 全 ${pending.length}件`);
+    });
+
     setProgress(`${pending.length}件の取り込みが終わりました`);
   }, []);
 

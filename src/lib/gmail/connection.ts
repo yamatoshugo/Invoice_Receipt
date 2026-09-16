@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { openToken, sealToken } from "./crypto";
 import { refreshAccessToken, revokeToken } from "./oauth";
@@ -13,6 +14,34 @@ import type { GmailConnectionState, GmailSendCapability } from "./types";
  */
 
 const ID = "default";
+
+/**
+ * 表示・判定に使う接続の行を読む。1リクエストにつき1回だけDBを叩く。
+ *
+ * connectionState / sendCapability / connectedAddress は同じ1行を見ているのに、
+ * 1画面で別々に引いていた（/upload/requests では3回）。
+ * リクエスト単位でまとめるので、返す値も画面の挙動も変わらない。
+ * 3つが同じリクエストの中で食い違わなくなるという効きもある。
+ *
+ * ★refreshTokenCipher は引かない。トークンが要るのは client.ts だけで、
+ * そこは loadRefreshToken() を通る。表示のために復号材料を持ち回らない。
+ *
+ * 更新（markSynced / markRevoked / saveConnection / disconnect）のあとに
+ * 同じリクエストでここを読み直す経路は無い。足すときは順序に注意すること。
+ */
+const readConnection = cache(async () =>
+  prisma.gmailConnection.findUnique({
+    where: { id: ID },
+    select: {
+      emailAddress: true,
+      scope: true,
+      connectedAt: true,
+      connectedByEmail: true,
+      lastSyncedAt: true,
+      lastSyncError: true,
+    },
+  }),
+);
 
 /**
  * 接続を保存する。呼ぶのは callback だけ。
@@ -125,7 +154,7 @@ export async function disconnect(): Promise<void> {
 
 /** 画面に渡す表示用の状態。トークンは含めない */
 export async function connectionState(): Promise<GmailConnectionState> {
-  const row = await prisma.gmailConnection.findUnique({ where: { id: ID } });
+  const row = await readConnection();
   if (!row) return { status: "disconnected" };
   if (row.lastSyncError) {
     return { status: "revoked", emailAddress: row.emailAddress, message: row.lastSyncError };
@@ -149,10 +178,7 @@ export async function connectionState(): Promise<GmailConnectionState> {
  * 押す前に「設定画面の『接続し直す』を1回押してください」と出すためのもの。
  */
 export async function sendCapability(): Promise<GmailSendCapability> {
-  const row = await prisma.gmailConnection.findUnique({
-    where: { id: ID },
-    select: { scope: true, lastSyncError: true, emailAddress: true },
-  });
+  const row = await readConnection();
   if (!row) {
     return { canSend: false, reason: "disconnected", message: new GmailNotConnectedError().message };
   }
@@ -172,10 +198,7 @@ export async function sendCapability(): Promise<GmailSendCapability> {
 
 /** 走査の記録に残す接続先アドレス */
 export async function connectedAddress(): Promise<string> {
-  const row = await prisma.gmailConnection.findUnique({
-    where: { id: ID },
-    select: { emailAddress: true },
-  });
+  const row = await readConnection();
   if (!row) throw new GmailNotConnectedError();
   return row.emailAddress;
 }

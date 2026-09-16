@@ -23,7 +23,21 @@ export default async function ExportPage({
   const [setting, invoices, batches] = await Promise.all([
     prisma.setting.findUnique({ where: { id: "default" } }),
     prisma.invoice.findMany({ where: { status: "APPROVED" }, orderBy: { createdAt: "asc" } }),
-    prisma.exportBatch.findMany({ orderBy: { createdAt: "desc" }, take: 10 }),
+    // CSVの実体(csvBase64)は引かない。この画面は一覧を出すだけで、
+    // 中身が要るのはダウンロード時（/api/export/[batchId]）だけ
+    prisma.exportBatch.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        transferDate: true,
+        fileName: true,
+        recordCount: true,
+        totalAmount: true,
+        isPaid: true,
+        paidAt: true,
+      },
+    }),
   ]);
 
   const result = setting ? buildExportCsv(setting, transferDate, invoices) : null;

@@ -319,6 +319,8 @@ model GmailScan {
 
   @@index([state])
   @@index([windowFrom])
+  /// 取り込み画面が新しい順に引くため
+  @@index([startedAt])
 }
 
 /// 走査で見た1通のメール。添付が無いメールも必ず行を作る。
@@ -378,6 +380,8 @@ model GmailMessage {
   @@index([scanId])
   /// 「リンクをまだ調べていないメール」を期間で引くため
   @@index([linksScannedAt])
+  /// 返信の検出で、依頼を送ったスレッドの続きを引くため（threadMessagesSince）
+  @@index([gmailThreadId])
 }
 
 /// 取り込み候補の種類
@@ -529,6 +533,8 @@ model GmailItem {
   @@unique([messageId, kind, ref])
   @@index([status])
   @@index([invoiceId])
+  /// 依頼キュー（kind=LINK かつ依頼系の状態）を引くため
+  @@index([kind, status])
 }
 
 /// 送った依頼メールの控え。1回の送信につき1行で、成功も失敗も残す。

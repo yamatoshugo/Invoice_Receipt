@@ -1,4 +1,5 @@
 import type { GmailScan } from "@/generated/prisma";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { prisma } from "@/lib/prisma";
 import { extractBody } from "./body";
 import { getGmailClient } from "./client";
@@ -19,13 +20,28 @@ import type { FoundAttachment } from "./parts";
  * メール数が多いと実行時間の上限を超えるため。
  */
 
-/** 1チャンクの持ち時間。maxDuration(300秒)に対して十分な余裕を取る */
+/**
+ * 1チャンクの持ち時間。
+ *
+ * 締切の判定は下の do-while の末尾にあり、★1ページを処理し終えたあとにしか見ない。
+ * つまり実際に走りうる最大時間は「この持ち時間 ＋ 最悪の1ページ」で、
+ * これが maxDuration(300秒) を下回っている必要がある。
+ * PAGE_SIZE を大きくするときは、この式が崩れていないか必ず確かめること。
+ */
 const CHUNK_BUDGET_MS = 55_000;
 
 /** messages.get の並列度。上げるとGmailの分あたり上限(429)に触れる */
 const FETCH_CONCURRENCY = 4;
 
-const PAGE_SIZE = 500;
+/**
+ * 1ページの件数。★上の CHUNK_BUDGET_MS と対になっている。
+ *
+ * 500件にすると、1ページを処理し切るまで一度も時計を見ないため、
+ * 締切が発火する前に maxDuration に達して打ち切られることがある。
+ * 打ち切られるとカーソルが進まないので、同じページを何度読み直しても終わらなくなる。
+ * 50件なら1ページの仕事量が有界になり、締切が間に合う。
+ */
+const PAGE_SIZE = 50;
 
 export interface ScanProgress {
   scanId: string;
@@ -328,23 +344,3 @@ function progressOf(scan: GmailScan, done: boolean): ScanProgress {
   };
 }
 
-/** 並列度を抑えて順に処理する。Gmailの分あたり上限に触れないため */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-
-  async function worker(): Promise<void> {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await fn(items[index]!);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}

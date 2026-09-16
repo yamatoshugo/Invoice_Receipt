@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Invoice } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
+import { isUniqueConflictOn } from "@/lib/prismaErrors";
 import { getInvoiceExtractor } from "@/lib/extraction";
 import { getFileStore } from "@/lib/storage";
 import type { StoredFile } from "@/lib/storage";
@@ -59,29 +60,38 @@ export async function ingestPdf(input: IngestInput): Promise<IngestResult> {
     where: { sha256 },
     select: { id: true, fileName: true },
   });
-  if (duplicate) {
-    // 重複分のファイルは残さない。呼び出し側に任せるとどこかで必ず忘れ、
-    // private ブロブにゴミが溜まり続ける
-    await getFileStore().delete(stored.pathname).catch(() => {});
-    return {
-      kind: "duplicate",
-      existingId: duplicate.id,
-      existingFileName: duplicate.fileName,
-      message: `同じ内容のPDFが既に取り込まれています（${duplicate.fileName}）`,
-    };
-  }
+  if (duplicate) return duplicateResult(duplicate, stored);
 
-  const invoice = await prisma.invoice.create({
-    data: {
-      fileName,
-      blobUrl: stored.url,
-      blobPathname: stored.pathname,
-      sha256,
-      fileSize,
-      status: "NEEDS_REVIEW",
-      ...originFields(origin),
-    },
-  });
+  let invoice: Invoice;
+  try {
+    invoice = await prisma.invoice.create({
+      data: {
+        fileName,
+        blobUrl: stored.url,
+        blobPathname: stored.pathname,
+        sha256,
+        fileSize,
+        status: "NEEDS_REVIEW",
+        ...originFields(origin),
+      },
+    });
+  } catch (error) {
+    // 上の findUnique と、この create の間に別の取り込みが同じPDFを入れた場合。
+    // 同じ請求書が2通のメールで届くのは想定どおりの事象なので、
+    // 取り込みを並列に走らせるとここは普通に起こる（直列でも別タブで起こる）。
+    //
+    // ★sha256 の競合だけを重複として扱う。他の一意制約まで飲み込むと、
+    // 別の事故が「重複」の顔をして静かに処理されてしまう。
+    if (!isUniqueConflictOn(error, "sha256")) throw error;
+
+    const raced = await prisma.invoice.findUnique({
+      where: { sha256 },
+      select: { id: true, fileName: true },
+    });
+    // 競合相手が巻き戻った等で見つからないなら、分かったことにせず元の例外を投げ直す
+    if (!raced) throw error;
+    return duplicateResult(raced, stored);
+  }
 
   // --- 読み取り ---
   const result = await getInvoiceExtractor().extract(pdf, fileName);
@@ -145,6 +155,26 @@ export async function ingestPdf(input: IngestInput): Promise<IngestResult> {
   });
 
   return { kind: "created", invoice: updated };
+}
+
+/**
+ * 重複と分かったときの後始末と結果。
+ *
+ * 保管した実体を必ずここで消す。呼び出し側に任せるとどこかで忘れ、
+ * private ブロブにゴミが溜まり続ける。
+ * 事前の判定と、競合で後から分かった場合の両方がここを通る。
+ */
+async function duplicateResult(
+  existing: { id: string; fileName: string },
+  stored: StoredFile,
+): Promise<IngestResult> {
+  await getFileStore().delete(stored.pathname).catch(() => {});
+  return {
+    kind: "duplicate",
+    existingId: existing.id,
+    existingFileName: existing.fileName,
+    message: `同じ内容のPDFが既に取り込まれています（${existing.fileName}）`,
+  };
 }
 
 /** 取り込み元を Invoice の列へ写す。UPLOAD は既定値のままなので source だけ */

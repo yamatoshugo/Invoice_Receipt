@@ -1,5 +1,6 @@
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { staleImportingBefore } from "@/lib/gmail/status";
 
 /** 自動で再試行する上限。これを超えた失敗は、人が見るまで再試行しない */
 const MAX_AUTO_ATTEMPTS = 5;
@@ -15,6 +16,11 @@ const MAX_AUTO_ATTEMPTS = 5;
  * もう一度ボタンを押すだけで拾い直せるようにするため
  * （個別に再試行する画面は持たない方針）。
  * PDF以外・開けない・サイズ超過は、何度試しても結果が変わらないので対象にしない。
+ *
+ * 取り残された IMPORTING も対象にする。実行時間の上限で打ち切られると
+ * IMPORTING のまま残り、放っておくと二度と拾い直されないため。
+ * ★占有側(items/[id]/import)と同じ基準を使うこと。片方だけだと
+ * 「一覧には出るのに押しても何も起きない」になる。
  */
 export async function GET(request: Request): Promise<Response> {
   const session = await auth();
@@ -33,6 +39,13 @@ export async function GET(request: Request): Promise<Response> {
         // 何度叩いても結果が変わらない相手（消えたURL等）を毎回試し直さない。
         // 上限に達した行は再試行されなくなるだけで、FAILED のまま未決着として画面に残る
         { status: "FAILED", attemptCount: { lt: MAX_AUTO_ATTEMPTS } },
+        // 取り残された取り込み。いま走っている最中のものを横取りしないよう、
+        // 占有した時刻が十分に古いものだけを対象にする
+        {
+          status: "IMPORTING",
+          attemptCount: { lt: MAX_AUTO_ATTEMPTS },
+          lastAttemptAt: { lt: staleImportingBefore() },
+        },
       ],
       message: { internalDate: { gte: scan.windowFrom, lt: scan.windowTo } },
     },

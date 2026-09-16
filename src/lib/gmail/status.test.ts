@@ -3,6 +3,8 @@ import { GmailItemStatus } from "@/generated/prisma";
 import {
   messageScanComplete,
   settlementOf,
+  staleImportingBefore,
+  STALE_IMPORTING_MS,
   STATUS_CLASSIFICATION,
   summarizeItems,
   unsettledReasonOf,
@@ -273,5 +275,30 @@ describe("messageScanComplete", () => {
 
   it("どちらも調べていなければ未完了", () => {
     expect(messageScanComplete({ attachmentsScannedAt: null, linksScannedAt: null })).toBe(false);
+  });
+});
+
+describe("staleImportingBefore", () => {
+  const now = new Date("2026-09-16T12:00:00Z");
+
+  it("猶予のぶんだけ過去の時刻を返す", () => {
+    expect(staleImportingBefore(now).getTime()).toBe(now.getTime() - STALE_IMPORTING_MS);
+  });
+
+  it("実行時間の上限(300秒)より十分に長い", () => {
+    // 短くすると、まだ走っている取り込みを横取りして二重に実行してしまう。
+    // maxDuration を引き上げたら、この猶予も見直すこと
+    expect(STALE_IMPORTING_MS).toBeGreaterThan(300 * 1000);
+  });
+
+  it("走り始めたばかりの取り込みは取り残し扱いにしない", () => {
+    const justStarted = new Date(now.getTime() - 30 * 1000);
+    // lastAttemptAt < この境界 のものだけを拾うので、境界より後＝対象外
+    expect(justStarted.getTime()).toBeGreaterThan(staleImportingBefore(now).getTime());
+  });
+
+  it("猶予を超えて止まっている取り込みは取り残し扱いにする", () => {
+    const abandoned = new Date(now.getTime() - STALE_IMPORTING_MS - 1000);
+    expect(abandoned.getTime()).toBeLessThan(staleImportingBefore(now).getTime());
   });
 });

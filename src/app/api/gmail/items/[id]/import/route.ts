@@ -8,6 +8,7 @@ import { getGmailClient } from "@/lib/gmail/client";
 import { markSynced } from "@/lib/gmail/connection";
 import { findPartById } from "@/lib/gmail/parts";
 import { isEncryptedPdf, looksLikePdf } from "@/lib/gmail/pdf";
+import { staleImportingBefore } from "@/lib/gmail/status";
 import { GmailNotConnectedError } from "@/lib/gmail/types";
 import { getLinkPicker, resolvePick } from "@/lib/linkpick";
 import { classifyFetched, fetchDocument, fileNameFromDownload } from "@/lib/safefetch";
@@ -46,9 +47,21 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   const { id } = await context.params;
 
   // --- 占有。別タブとの二重実行を防ぐ ---
-  // sha256の一意制約が最後の砦だが、自分の行同士で「重複」になると画面が意味不明になる
+  // sha256の一意制約が最後の砦だが、自分の行同士で「重複」になると画面が意味不明になる。
+  //
+  // 取り残された IMPORTING も占有し直す。実行時間の上限で打ち切られたり、
+  // catch に入る前に落ちたりすると IMPORTING のまま残り、
+  // これが無いと未決着のまま二度と拾い直せなくなる。
+  // ★時刻の条件込みで1回の updateMany に収めてあるので、占有の原子性は変わらない。
+  //   先に読んで判定してから更新すると、その隙に別のリクエストが入る。
   const claimed = await prisma.gmailItem.updateMany({
-    where: { id, status: { in: ["PENDING", "FAILED"] } },
+    where: {
+      id,
+      OR: [
+        { status: { in: ["PENDING", "FAILED"] } },
+        { status: "IMPORTING", lastAttemptAt: { lt: staleImportingBefore() } },
+      ],
+    },
     data: { status: "IMPORTING", attemptCount: { increment: 1 }, lastAttemptAt: new Date() },
   });
   if (claimed.count !== 1) {

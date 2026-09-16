@@ -202,3 +202,27 @@ export interface MessageLike {
 export function messageScanComplete(message: MessageLike): boolean {
   return message.attachmentsScannedAt !== null && message.linksScannedAt !== null;
 }
+
+/**
+ * IMPORTING のまま取り残された候補を、もう一度取り込んでよいと見なすまでの猶予。
+ *
+ * 取り込みは占有（PENDING/FAILED → IMPORTING）してから始まるので、
+ * 関数が実行時間の上限で打ち切られたり、catch に入る前に落ちたりすると
+ * IMPORTING のまま残る。未決着として画面には出続けるが、
+ * 占有の対象からも取り込み待ちの一覧からも外れるため、
+ * ★もう一度ボタンを押しても永久に拾い直されない。
+ *
+ * ここを短くすると、まだ走っている取り込みを横取りして二重に実行してしまう。
+ * 実行時間の上限(300秒)より十分に長く取ること。
+ */
+export const STALE_IMPORTING_MS = 10 * 60 * 1000;
+
+/**
+ * この時刻より前に占有された IMPORTING は、取り残されたと見なす。
+ *
+ * 取り込み待ちの一覧（/api/gmail/pending）と占有（items/[id]/import）の
+ * 両方が同じ基準を使う。片方だけに入れると「一覧には出るのに押せない」になる。
+ */
+export function staleImportingBefore(now: Date = new Date()): Date {
+  return new Date(now.getTime() - STALE_IMPORTING_MS);
+}

@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { upload } from "@vercel/blob/client";
 import { buttonClass } from "@/components/ui";
+import { IMPORT_CONCURRENCY } from "@/lib/importConcurrency";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import type { StorageMode } from "@/lib/storage/types";
 
 type ItemState = "waiting" | "uploading" | "extracting" | "done" | "duplicate" | "error";
@@ -112,11 +114,12 @@ export function UploadDropzone({ mode }: { mode: StorageMode }) {
       setItems((prev) => [...prev, ...pdfs.map((file) => ({ file, state: "waiting" as ItemState }))]);
       setRunning(true);
 
-      // 1件ずつ順に処理する。読み取りは1件あたり数十秒かかるため、
-      // まとめて投げるとサーバー側で詰まり、進捗も分からなくなる。
-      for (let i = 0; i < pdfs.length; i += 1) {
+      // ★1リクエストにつきPDF1通、という形は必ず守る。読み取りは1通あたり数十秒かかるので、
+      // 1リクエストに複数通を詰め込むと実行時間の上限を超え、進捗も分からなくなる。
+      // これを守ったうえで、独立したリクエストを数本だけ同時に走らせる。
+      // 各行の状態は添字で更新するので、順不同で終わっても表示は崩れない。
+      await mapWithConcurrency(pdfs, IMPORT_CONCURRENCY, async (file, i) => {
         const index = startIndex + i;
-        const file = pdfs[i];
 
         try {
           update(index, { state: "uploading" });
@@ -154,7 +157,7 @@ export function UploadDropzone({ mode }: { mode: StorageMode }) {
             message: error instanceof Error ? error.message : "不明なエラー",
           });
         }
-      }
+      });
 
       setRunning(false);
       router.refresh();

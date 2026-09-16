@@ -1,6 +1,7 @@
 import { loadRefreshToken, markRevoked } from "./connection";
 import { refreshAccessToken } from "./oauth";
 import { parseFromHeader } from "./parts";
+import { retryWaitMs } from "./retry";
 import {
   AttachmentResponseSchema,
   GmailApiError,
@@ -111,11 +112,9 @@ async function call(path: string, options: CallOptions = {}): Promise<unknown> {
     }
     if (!isRetryable(res.status) || attempt >= maxAttempts) throw lastError;
 
-    // Retry-After があれば従い、無ければ指数バックオフ＋ジッタ
-    const retryAfter = Number(res.headers.get("retry-after"));
-    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-      ? retryAfter * 1000
-      : 2 ** attempt * 250 + Math.random() * 250;
+    // Retry-After があれば従い、無ければ指数バックオフ＋ジッタ。
+    // 相手の言い値をそのまま待たない理由は retry.ts のコメントを参照
+    const waitMs = retryWaitMs(res.headers.get("retry-after"), attempt);
     await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 

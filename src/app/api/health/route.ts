@@ -32,6 +32,28 @@ const REQUIRED = [
 /** 本番に入っていてはいけないもの（入っていたら赤信号） */
 const FORBIDDEN_IN_PRODUCTION = ["AUTH_DEV_LOGIN", "STORAGE", "EXTRACTOR"] as const;
 
+/**
+ * 接続先DBのリージョンだけを取り出す（例: "ap-southeast-1"）。
+ *
+ * 関数のリージョンとDBのリージョンが離れていると、DBを1回叩くたびに
+ * その距離を往復する。1画面で10回引けば10往復ぶん遅くなるが、
+ * 症状としては「なんとなく重い」としか出ないので原因に辿り着きにくい。
+ * deployment.region と並べて見られるようにしておく。
+ *
+ * ★ホスト名も認証情報も返さない。地域名だけを取り出す。
+ * ローカル（localhost）のように地域名を含まない接続先では null になる。
+ */
+function databaseRegion(): string | null {
+  const url = process.env.DATABASE_URL;
+  if (!url) return null;
+  try {
+    // AWSの地域名の形（ap-southeast-1 / us-east-2 など）だけを拾う
+    return new URL(url).hostname.match(/\b[a-z]{2}-[a-z]+-\d+\b/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(): Promise<Response> {
   const session = await auth();
   if (!session?.user?.email) {
@@ -51,6 +73,8 @@ export async function GET(): Promise<Response> {
       branch: process.env.VERCEL_GIT_COMMIT_REF ?? null,
       region: process.env.VERCEL_REGION ?? null,
     },
+    // 上の deployment.region と見比べる。離れているとDBを叩くたびに往復する
+    database: { region: databaseRegion() },
     storage: storageMode(),
     appBaseUrl: process.env.APP_BASE_URL ?? null,
     // 値は出さない。設定の有無だけ
