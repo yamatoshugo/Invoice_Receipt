@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Prisma } from "@/generated/prisma";
-import { isUniqueConflictOn } from "./prismaErrors";
+import { isSerializationFailure, isUniqueConflictOn } from "./prismaErrors";
 
 const uniqueConflict = (target: unknown): Prisma.PrismaClientKnownRequestError =>
   new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
@@ -46,5 +46,24 @@ describe("isUniqueConflictOn", () => {
     expect(isUniqueConflictOn(new Error("network down"), "sha256")).toBe(false);
     expect(isUniqueConflictOn("P2002", "sha256")).toBe(false);
     expect(isUniqueConflictOn(null, "sha256")).toBe(false);
+  });
+});
+
+describe("isSerializationFailure", () => {
+  it("P2034 なら true", () => {
+    const conflict = new Prisma.PrismaClientKnownRequestError("Write conflict", {
+      code: "P2034",
+      clientVersion: "test",
+    });
+    expect(isSerializationFailure(conflict)).toBe(true);
+  });
+
+  it("★別のPrismaエラーは false。やり直せば直るものと、直らないものを混ぜない", () => {
+    expect(isSerializationFailure(uniqueConflict(["email"]))).toBe(false);
+  });
+
+  it("Prisma以外の例外は false（握り潰さずに投げ直させる）", () => {
+    expect(isSerializationFailure(new Error("P2034"))).toBe(false);
+    expect(isSerializationFailure(null)).toBe(false);
   });
 });

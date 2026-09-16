@@ -1,71 +1,121 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import Google from "next-auth/providers/google";
+import type { User } from "@/generated/prisma";
+import { authConfig } from "@/auth.config";
+import { prisma } from "@/lib/prisma";
+import { bootstrapFirstUser } from "@/lib/auth/bootstrap";
+import { verifyAgainstDummy, verifyPassword } from "@/lib/auth/password";
 
 /**
- * 請求書と口座情報を扱うため、許可リストに載っているGoogleアカウント以外は
- * ログインさせない。Google Workspace のドメインだけで絞ると退職者や
- * 無関係な社員も入れてしまうので、メールアドレスの完全一致で判定する。
- */
-function allowedEmails(): string[] {
-  return (process.env.ALLOWED_EMAILS ?? "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-/**
- * デプロイ前にローカルで操作確認するための簡易ログイン。
+ * ログインできるのは User テーブルに行がある人だけ。
  *
- * Google Cloud の OAuth 設定なしで画面を触れるようにするためのものなので、
- * 環境変数と NODE_ENV の二重で条件を付ける。
- * 本番ビルドでは AUTH_DEV_LOGIN を立てても有効にならない。
+ * 以前は Google OAuth + 許可リスト(ALLOWED_EMAILS)だった。安全ではあったが、
+ * 「誰が使えるか」が環境変数にあるため、人が入れ替わるたびに再デプロイが要り、
+ * 画面からは誰が使えるのか確認できなかった。
+ * DBの行にして、設定画面から追加・削除できるようにしてある。
  */
-export const devLoginEnabled =
-  process.env.NODE_ENV !== "production" && process.env.AUTH_DEV_LOGIN === "1";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const devLoginProvider = Credentials({
-  id: "dev-login",
-  name: "開発用ログイン",
-  credentials: { email: { label: "メールアドレス", type: "email" } },
-  authorize(credentials) {
-    if (!devLoginEnabled) return null;
-    const email = String(credentials?.email ?? "")
-      .trim()
-      .toLowerCase();
-    if (!EMAIL_PATTERN.test(email)) return null;
-
-    // 許可リストがあれば本番と同じ基準で絞る。
-    // 空のときだけ、動作確認を始められるように任意のアドレスを通す。
-    const list = allowedEmails();
-    if (list.length > 0 && !list.includes(email)) return null;
-
-    return { id: email, email, name: email };
-  },
-});
+function toAuthUser(user: User) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.email,
+    // 下の jwt コールバックで「発行後にパスワードが変わっていないか」を見るために持たせる
+    passwordUpdatedAt: user.passwordUpdatedAt.getTime(),
+  };
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: devLoginEnabled ? [Google, devLoginProvider] : [Google],
-  session: { strategy: "jwt" },
-  pages: { signIn: "/signin", error: "/signin" },
-  callbacks: {
-    signIn({ account, profile }) {
-      // 簡易ログインは authorize 側で判定済み。
-      // devLoginEnabled が false ならプロバイダ自体が存在しないため、ここには到達しない。
-      if (account?.provider === "dev-login") return devLoginEnabled;
+  ...authConfig,
+  providers: [
+    Credentials({
+      id: "password",
+      name: "メールアドレスとパスワード",
+      credentials: {
+        email: { label: "メールアドレス", type: "email" },
+        password: { label: "パスワード", type: "password" },
+      },
+      /**
+       * ★ここがログインできるかどうかの唯一の関門。
+       * signIn コールバックは置かない（判定が2か所に散ると、片方だけ直して穴が空く）。
+       */
+      async authorize(raw) {
+        const email = String(raw?.email ?? "")
+          .trim()
+          .toLowerCase();
+        // ★パスワードは trim しない。設定時と照合時で1バイトでも違えば通らなくなる
+        const password = String(raw?.password ?? "");
+        if (!EMAIL_PATTERN.test(email) || password === "") return null;
 
-      const list = allowedEmails();
-      // 許可リストが未設定のまま公開すると誰でも入れてしまうため、その場合は全員拒否する
-      if (list.length === 0) return false;
-      const email = profile?.email?.toLowerCase();
-      if (!email) return false;
-      if (profile?.email_verified === false) return false;
-      return list.includes(email);
-    },
-    authorized({ auth: session }) {
-      return Boolean(session?.user);
+        const user = await prisma.user.findUnique({ where: { email } });
+
+        if (!user) {
+          // まだ誰も登録されていないときだけ、環境変数の初期ユーザーを作る
+          const created = await bootstrapFirstUser(email, password);
+          if (created) return toAuthUser(created);
+
+          // ★登録が無いアドレスでも、照合したのと同じだけ時間を使ってから落とす。
+          // すぐ返すと応答の速さだけで「このアドレスは登録済み」が外から分かる
+          await verifyAgainstDummy(password);
+          return null;
+        }
+
+        if (!(await verifyPassword(password, user.passwordHash))) return null;
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLoginAt: new Date() },
+        });
+        return toAuthUser(user);
+      },
+    }),
+  ],
+  callbacks: {
+    ...authConfig.callbacks,
+
+    /**
+     * 削除・パスワード再設定を、発行済みのCookieへその場で反映させる。
+     *
+     * ★session.user.email を保つための処理ではない。
+     * authorize() が返した email は既定で token.email → session.user.email に入る
+     * （@auth/core/lib/actions/callback/index.js の defaultToken と
+     * 　lib/actions/session.js の user: { email: token.email }）。
+     *
+     * これを置いている理由は失効だけ。JWTセッションはDBを見ないので、
+     * 何もしないと「設定画面から削除したのに、その人は最大7日間ログインしたまま」になる。
+     * その場で効かない削除ボタンは、機能ではなく不具合。
+     *
+     * null を返すとセッションが作られずCookieも削除される
+     * （lib/actions/session.js の if (token !== null) ... else sessionStore.clean()）。
+     *
+     * 代償: auth() 1回につき主キー引きが1本増える。
+     * proxy には効かせていないので（src/auth.config.ts 参照）、増えるのは
+     * 実際にページやAPIを処理するときだけ。
+     */
+    async jwt({ token, user }) {
+      // ログインした直後。authorize() の戻り値がそのまま渡ってくる
+      if (user) {
+        token.passwordUpdatedAt = user.passwordUpdatedAt;
+        return token;
+      }
+
+      if (!token.sub) return null;
+
+      const current = await prisma.user.findUnique({
+        where: { id: token.sub },
+        select: { email: true, passwordUpdatedAt: true },
+      });
+      // 削除済み
+      if (!current) return null;
+      // このCookieが発行された後にパスワードが再設定されている
+      if (current.passwordUpdatedAt.getTime() !== token.passwordUpdatedAt) return null;
+
+      // アドレスを変えたときに追随させる
+      token.email = current.email;
+      token.name = current.email;
+      return token;
     },
   },
 });

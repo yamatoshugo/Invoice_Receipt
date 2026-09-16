@@ -1,7 +1,11 @@
 // 請求書一括振込システム — MVPスキーマ
 //
-// 認証は Auth.js の JWT セッション（アダプタなし）で行うため、
-// ユーザー・セッションのテーブルは持たない。操作者はメールアドレスで記録する。
+// 認証は Auth.js の JWT セッション（アダプタなし）で行う。
+// ログインできる人は User に持つが、Account / Session / VerificationToken は持たない。
+//
+// ★各テーブルの *ByEmail は User へのリレーションではなく、非正規化した監査記録。
+// 意図的に文字列のまま持たせてある。ユーザーの行を消しても
+// 「誰が何をしたか」は残さなければ監査記録の意味がないため。
 
 // 既定の出力先 (node_modules/.prisma/client) は、Next.js が外部モジュールとして
 // 読み込む際に内部の subpath import (#main-entry-point) を解決できず失敗する。
@@ -218,6 +222,42 @@ model Setting {
   /// 差出人の表示名。空なら表示名を付けずアドレスだけで送る
   requestMailFromName String?
 
+  updatedByEmail String?
+}
+
+/// このシステムにログインできる人。
+///
+/// ★他テーブルの updatedByEmail / createdByEmail などはここへのリレーションではない。
+/// 行を消してもその人が行った操作の記録は残さなければならないため、
+/// 意図的に文字列のまま持たせてある（スキーマ冒頭の注記を参照）。
+///
+/// 権限の区別は設けない。ログインできる人は全員、人を追加・削除できる。
+/// 5人規模の社内ツールで管理者権限を作ると、その人が休んだ日に誰も操作できなくなる。
+model User {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// ログインID。★必ず小文字へ正規化して保存する。
+  /// 大小違いの二重登録は「ログインできない人」と「監査記録が2つに割れる」を同時に生む
+  email String @unique
+
+  /// scrypt のハッシュ。形式は src/lib/auth/password.ts。★平文は絶対に入れない。
+  /// ★この列を画面へ渡してはいけない。一覧は lib/auth/users.ts の listUsers() を通すこと
+  passwordHash String
+
+  /// パスワードを最後に設定した時刻。
+  /// ★再設定した瞬間に、その人の発行済みCookieを無効化するために使う（src/auth.ts の jwt）
+  passwordUpdatedAt DateTime @default(now())
+
+  /// 最後にログインできた時刻。長く使われていないアカウントを見つけるため
+  lastLoginAt DateTime?
+
+  /// 誰が追加したか。他テーブルと同じ非正規化した監査記録。
+  /// 最初の1人は環境変数から自動作成されるので null になる
+  createdByEmail String?
+
+  /// 最後に誰がパスワードを再設定したか
   updatedByEmail String?
 }
 

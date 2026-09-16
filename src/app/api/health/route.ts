@@ -18,9 +18,6 @@ const REQUIRED = [
   "DATABASE_URL",
   "DIRECT_URL",
   "AUTH_SECRET",
-  "AUTH_GOOGLE_ID",
-  "AUTH_GOOGLE_SECRET",
-  "ALLOWED_EMAILS",
   "ANTHROPIC_API_KEY",
   "BLOB_READ_WRITE_TOKEN",
   "GMAIL_CLIENT_ID",
@@ -30,7 +27,16 @@ const REQUIRED = [
 ] as const;
 
 /** 本番に入っていてはいけないもの（入っていたら赤信号） */
-const FORBIDDEN_IN_PRODUCTION = ["AUTH_DEV_LOGIN", "STORAGE", "EXTRACTOR"] as const;
+const FORBIDDEN_IN_PRODUCTION = ["STORAGE", "EXTRACTOR"] as const;
+
+/**
+ * 最初の1人を作るための設定。
+ *
+ * ★REQUIRED には入れない。初回ログインが済めば無いのが正常な状態で、
+ * 必須にすると ok:false が常態化し、本当に困ったときに誰も見なくなる。
+ * 代わりに「残っている」ことだけを警告として出す（ok は落とさない）。
+ */
+const BOOTSTRAP = ["INITIAL_ADMIN_EMAIL", "INITIAL_ADMIN_PASSWORD"] as const;
 
 /**
  * 接続先DBのリージョンだけを取り出す（例: "ap-southeast-1"）。
@@ -65,6 +71,13 @@ export async function GET(): Promise<Response> {
   const missing = REQUIRED.filter((name) => !present(name));
   const unexpected = FORBIDDEN_IN_PRODUCTION.filter((name) => present(name));
 
+  // ok は落とさない。「消し忘れ」であって「壊れている」ではないため
+  const warnings = present("INITIAL_ADMIN_PASSWORD")
+    ? [
+        "INITIAL_ADMIN_PASSWORD が残っています。最初のログインが済んだら削除して再デプロイしてください。",
+      ]
+    : [];
+
   return Response.json({
     // どのデプロイを見ているかの確認用。URLを取り違えているとここで分かる
     deployment: {
@@ -81,10 +94,13 @@ export async function GET(): Promise<Response> {
     env: Object.fromEntries([
       ...REQUIRED.map((name) => [name, present(name)]),
       ...FORBIDDEN_IN_PRODUCTION.map((name) => [name, present(name)]),
+      ...BOOTSTRAP.map((name) => [name, present(name)]),
     ]),
     missing,
     // 本番でこれが空でなければ、設定を消すまで使ってはいけない
     unexpected,
+    // 動作は止まらないが、放置してはいけないもの
+    warnings,
     ok: missing.length === 0 && unexpected.length === 0,
   });
 }

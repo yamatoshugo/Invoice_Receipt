@@ -212,7 +212,7 @@ let cached: GmailClient | null = null;
  * Gmailの読み取り口を返す。
  *
  * 接続情報はDBのシングルトン行にあり、アプリのセッションとは無関係。
- * そのため誰がログインしていても（開発用の簡易ログインでも）同じ受信箱を読める。
+ * そのため誰がログインしていても同じ受信箱を読める。
  * 未接続なら GmailNotConnectedError が投げられる。
  */
 export function getGmailClient(): GmailClient {

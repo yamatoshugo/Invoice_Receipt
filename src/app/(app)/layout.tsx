@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { auth, signOut } from "@/auth";
 import { DevModeBanner } from "@/components/DevModeBanner";
 
@@ -15,6 +16,10 @@ const NAV = [
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
+  // proxy はCookieが復号できるかしか見ない（src/auth.config.ts 参照）。
+  // 削除された人・パスワードを再設定された人のCookieはそこを通過してくるので、
+  // 実際の締め出しはここで効かせる
+  if (!session?.user?.email) redirect("/signin");
 
   return (
     <div className="min-h-screen">

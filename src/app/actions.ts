@@ -6,6 +6,7 @@ import type { Invoice, InvoiceStatus, Vendor } from "@/generated/prisma";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getFileStore } from "@/lib/storage";
+import { addUser, deleteUser, resetPassword } from "@/lib/auth/users";
 import { disconnect as disconnectGmailConnection } from "@/lib/gmail/connection";
 import { sendRequestMail, skipRequest } from "@/lib/gmail/requests";
 import { digitsOnly, parseIsoDate } from "@/lib/invoices";
@@ -461,6 +462,52 @@ export async function saveSettings(_prev: ActionState, formData: FormData): Prom
   revalidatePath("/settings");
   revalidatePath("/export");
   return { ok: true, message: "保存しました" };
+}
+
+// ===== 利用者 =====
+//
+// 規則とガード（自分は消せない・最後の1人は消せない）は lib/auth/users.ts 側にある。
+// ここは「ログインを確かめて渡し、画面を作り直す」だけに留める。
+
+export async function addAppUser(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const actorEmail = await requireEmail();
+
+  const result = await addUser({
+    email: String(formData.get("email") ?? ""),
+    password: String(formData.get("password") ?? ""),
+    confirm: String(formData.get("confirm") ?? ""),
+    actorEmail,
+  });
+
+  if (result.ok) revalidatePath("/settings");
+  return result;
+}
+
+export async function resetAppUserPassword(
+  userId: string,
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const actorEmail = await requireEmail();
+
+  const result = await resetPassword({
+    userId,
+    password: String(formData.get("password") ?? ""),
+    confirm: String(formData.get("confirm") ?? ""),
+    actorEmail,
+  });
+
+  if (result.ok) revalidatePath("/settings");
+  return result;
+}
+
+export async function deleteAppUser(userId: string): Promise<ActionState> {
+  const actorEmail = await requireEmail();
+
+  const result = await deleteUser({ userId, actorEmail });
+
+  if (result.ok) revalidatePath("/settings");
+  return result;
 }
 
 // ===== 取引先マスタ =====

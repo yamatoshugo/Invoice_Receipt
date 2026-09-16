@@ -63,17 +63,18 @@ npm run dev                   # http://localhost:3000
 ```
 DATABASE_URL="postgresql://invoice:invoice@localhost:55432/invoice?schema=public"
 AUTH_SECRET="..."             # node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-ALLOWED_EMAILS="あなたのメールアドレス"
-AUTH_DEV_LOGIN="1"            # メールアドレスだけでログインできる簡易ログイン
+INITIAL_ADMIN_EMAIL="あなたのメールアドレス"
+INITIAL_ADMIN_PASSWORD="..."  # 12文字以上
 STORAGE="local"               # PDFを .uploads/ に保存する（Vercel Blob を使わない）
 EXTRACTOR="stub"              # PDFを読まずダミーの読み取り結果を返す
 ```
 
-`/signin` に「開発用ログイン」が出るので、`ALLOWED_EMAILS` に入れたアドレスでログインします。
+`/signin` で `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` の値を入力すると、
+それが最初の利用者として登録されます（→「[ユーザーの管理](#ユーザーの管理)」）。
 
 | 変数 | 役割 | 本番との違い |
 |---|---|---|
-| `AUTH_DEV_LOGIN` | メールアドレスだけでログイン | **`NODE_ENV=production` では立てても無効**（`src/auth.ts` で二重にガード） |
+| `INITIAL_ADMIN_*` | 最初の1人を作る | 本番でも同じ仕組み。**利用者が1人でもいれば無視される** |
 | `STORAGE=local` | PDFを `.uploads/` に保存 | 本番はブラウザから Vercel Blob へ直接アップロード |
 | `EXTRACTOR=stub` | ダミーの読み取り結果 | **本番で指定すると起動時に例外**。偽の口座がCSVに載るのを防ぐため |
 
@@ -99,13 +100,12 @@ EXTRACTOR="stub"              # PDFを読まずダミーの読み取り結果を
 |---|---|
 | `DATABASE_URL` | [Neon](https://neon.tech) で Postgres を作成し接続文字列を取得 |
 | `AUTH_SECRET` | `openssl rand -base64 32` で生成 |
-| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | Google Cloud Console → 認証情報 → OAuth 2.0 クライアントID（種類: ウェブアプリケーション）<br>リダイレクトURI: `http://localhost:3000/api/auth/callback/google` と本番URLの同パス |
-| `ALLOWED_EMAILS` | このシステムを使う人のGoogleアカウントをカンマ区切りで列挙 |
+| `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` | 自分で決める。最初の1人を作るためだけに使う（→「[ユーザーの管理](#ユーザーの管理)」） |
 | `BLOB_READ_WRITE_TOKEN` | Vercel ダッシュボード → Storage → Blob ストアを作成 |
 | `ANTHROPIC_API_KEY` | [Anthropic Console](https://console.anthropic.com) |
 
-> `ALLOWED_EMAILS` が空の場合、**誰もログインできません**。
-> 未設定のまま公開して全員が入れてしまう事故を防ぐための挙動です。
+> ログインにGoogleは使いません。アカウントはこのシステムのDBに保存され、
+> 画面［設定 ≫ 利用者］から追加・削除できます。
 
 ### 2. 起動
 
@@ -128,11 +128,62 @@ npm run dev
 
 ## Vercelへのデプロイ
 
-- **Vercel Pro が必要。** 読み取りは1件10〜40秒かかるため、
-  `/api/invoices` で `maxDuration = 300` を使っている（Hobbyでは足りない）
+- **実行時間の面では無料プランでも足りる**（2026-09-16 時点）。読み取りは1件10〜40秒かかるため
+  `maxDuration = 300` を使っているが、Hobbyの上限も300秒になった
+  （**Fluid compute が有効であること**が条件）。
+  ただし**Hobbyは規約上、非商用・個人利用に限られる**。詳細は [docs/DEPLOY.md](docs/DEPLOY.md)
+- **関数のリージョンをDBと同じ方面に寄せること。** 離れているとDBを引くたびに往復する。
+  `/api/health` の `deployment.region` と `database.region` を見比べる
 - 環境変数を Production / Preview 双方に設定する。
   **Preview環境には本番DBを繋がないこと**（テスト操作が本番データを壊すため）
 - ビルドコマンドは `npm run build`（`prisma generate` を含む）
+
+---
+
+## ユーザーの管理
+
+ログインはメールアドレスとパスワードで行います。アカウントはこのシステムのDBに保存され、
+**ログインできる人は全員、画面［設定 ≫ 利用者］から利用者を追加・削除できます**。
+権限の区別は設けていません（管理者役を作ると、その人が休んだ日に誰も操作できなくなるため）。
+
+### 最初の1人
+
+デプロイ直後は利用者が0人で、誰もログインできません。利用者を追加する画面はログインの先に
+あるため、そのままでは永久に入れません。これを解くために環境変数を使います。
+
+1. `INITIAL_ADMIN_EMAIL` と `INITIAL_ADMIN_PASSWORD` を設定する
+2. `/signin` でその値を入力すると、最初の利用者として登録されログインできる
+3. 2人目以降は［設定 ≫ 利用者］から追加する
+4. **最初のログインが済んだら、この2つの環境変数は削除する**（`/api/health` が警告を出します）
+
+利用者が1人でも登録されていれば、この2つの環境変数は無視されます。恒久的な裏口にはなりません。
+
+### 削除とパスワード再設定
+
+**どちらもその場で反映されます。** 削除された人・パスワードを再設定された人は、
+開いている画面で次に何か操作した時点でログイン画面に戻されます
+（セッションは毎回DBと突き合わせているため — [src/auth.ts](src/auth.ts) の `jwt` コールバック）。
+
+締め出しを防ぐため、2つだけ機械的に禁止しています:
+
+| 禁止 | 理由 |
+|---|---|
+| 自分自身の削除 | その場で全画面から締め出される |
+| 最後の1人の削除 | 誰もログインできなくなり、環境変数を入れ直して再デプロイするまで復旧できない |
+
+**削除しても、その人が行った操作の記録は残ります。** 請求書の更新者・CSVの出力者・Gmailの
+接続者などは、利用者テーブルへの参照ではなくメールアドレスの文字列として保存してあります
+（消えてしまうと監査記録の意味がなくなるため）。
+
+### パスワードの保存
+
+`node:crypto` の scrypt でハッシュ化して保存します（[password.ts](src/lib/auth/password.ts)）。
+平文はどこにも保存しません。ソルトは利用者ごとに毎回生成するので、同じパスワードの人が
+2人いても、DBを見て「同じである」ことは分かりません。
+
+> **レート制限・アカウントロックは実装していません。** scryptに約100msかかるため
+> 総当たりは実質10回/秒程度に落ちますが、これは防御ではありません。
+> 12文字以上のパスワードを使ってください（画面側で強制しています）。
 
 ---
 
@@ -293,9 +344,10 @@ Workspace組織の**内部(Internal)アプリなら審査不要**ですが、無
 7. `.env` に `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_TOKEN_KEY` / `APP_BASE_URL` を設定
 8. 設定画面の「Gmailを接続する」を押し、専用アドレスで認可する
 
-> **ログイン用の `AUTH_GOOGLE_*` とは別のOAuthクライアント・別のGCPプロジェクトにしてください。**
-> 「Internal」はクライアント単位ではなくプロジェクト単位の設定なので、ログイン用と共有すると、
-> `ALLOWED_EMAILS` に組織外のアドレスを入れた瞬間にログインが壊れます。
+> **これはこのシステムへのログインとは無関係です。**
+> ログインはメールアドレスとパスワードで行い、Googleは使いません。
+> ここでGoogleに繋ぐのは「請求書受け取り専用のメールボックスを読むため」だけで、
+> 誰がログインしていてもボタン一つで同じ受信箱を読めます。
 
 リフレッシュトークンは **AES-256-GCM で暗号化して**DBに保存します。鍵は環境変数（Vercel）、
 暗号文はDB（Neon）に置くことで信頼境界を分け、片方だけが漏れても復号できないようにしています。

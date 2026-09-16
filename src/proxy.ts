@@ -1,7 +1,19 @@
+import NextAuth from "next-auth";
+import { authConfig } from "@/auth.config";
+
 // Next.js 16 で middleware は proxy に改名された（機能は同じ）。
 // 各 Server Action は使用先ページへのPOSTとして扱われ、matcher の除外がそのまま効くため、
 // ここだけに頼らず actions.ts 側でも毎回セッションを検証している。
-export { auth as proxy } from "@/auth";
+//
+// ★@/auth ではなく @/auth.config から作ること。
+// @/auth は Prisma を読み込むので、そのまま export すると
+// 画面遷移していないリンクをホバーしただけでDBに繋ぐ proxy になる。
+// ここが見るのは「Cookieが復号できるか」だけ。削除・パスワード再設定の反映は
+// @/auth 側の jwt コールバックと、(app)/layout.tsx のガードで効かせている。
+// ★分割代入のまま export すると Next.js が「関数の export」と認識できずビルドが落ちる。
+// 一度受けてから名前を付け直す。
+const { auth } = NextAuth(authConfig);
+export const proxy = auth;
 
 export const config = {
   // 認証関連と静的ファイル以外はすべて保護する（未ログインは /signin へ飛ぶ）

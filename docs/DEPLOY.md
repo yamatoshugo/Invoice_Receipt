@@ -1,11 +1,13 @@
 # デプロイ手順（Vercel）
 
 初回デプロイの手順書。**上から順にやれば動く**ように書いてある。
-所要はおよそ1〜2時間（Googleの画面遷移が多いのと、待ち時間があるため）。
+所要はおよそ1時間（待ち時間があるため）。
 
 > **先に知っておくこと**
-> - 必要なアカウントは **Vercel（Pro・有料） / Neon / Vercel Blob / Google OAuth（ログイン用）** の4つ。
+> - 必要なアカウントは **Vercel（Pro・有料） / Neon / Vercel Blob** の3つ。
 >   どれか1つでも欠けると画面に入れない
+> - **ログインにGoogleは使わない。** メールアドレスとパスワードで、アカウントは
+>   このシステムのDBに保存される。最初の1人だけ環境変数で作る（手順2-3と手順5-1）
 > - **本番URLが決まらないと設定できない項目がある**ので、
 >   「一度デプロイ → URLが決まる → 設定を足して再デプロイ」という順番になる
 > - 銀行の値（振込依頼人コード等）が無くてもデプロイ自体はできる。
@@ -144,44 +146,41 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 
 ---
 
-## 2. ログイン用の Google OAuth クライアントを作る
+## 2. Vercel にプロジェクトを作って1回目のデプロイ
 
-**★Gmail取り込み用とは別のGCPプロジェクトに作ること。**
-「内部(Internal)」はクライアント単位ではなく**プロジェクト単位**の設定なので、共有すると
-`ALLOWED_EMAILS` に組織外のアドレスを入れた瞬間にログインが壊れる。
-
-1. https://console.cloud.google.com で**新しいプロジェクトを作成**（例: `invoice-receipt-login`）
-2. 左メニュー **APIとサービス → OAuth同意画面**
-   - User Type: **内部**（Workspace組織なので選べる）
-   - アプリ名: `請求書一括振込`／サポートメール: 自分のアドレス
-   - スコープは**追加しない**（メールアドレスと氏名だけで足りる）
-3. **APIとサービス → 認証情報 → 認証情報を作成 → OAuth クライアント ID**
-   - アプリケーションの種類: **ウェブ アプリケーション**
-   - 名前: `invoice-receipt-web`
-   - **承認済みのリダイレクト URI**: いまは空のままでよい（手順5で本番URLを登録する）
-4. 作成後に表示される **クライアントID** と **クライアントシークレット**を控える
-
----
-
-## 3. Vercel にプロジェクトを作って1回目のデプロイ
-
-### 3-1. サインアップとPro契約
+### 2-1. サインアップとプランの選択
 
 1. https://vercel.com → **Sign Up** → **Continue with GitHub**
-2. 個人アカウント（Hobby）ができるので、**Pro にアップグレード**する
-   - 画面右上のアカウント → **Settings → Billing → Upgrade**
-   - 料金はメンバー1人あたり月額（画面で最新の金額を確認すること）
+2. 個人アカウント（Hobby ＝ 無料）ができる
 
-**Proが要る理由は2つ。**
+**実行時間の面では、無料プランでも足りる**（2026-09-16 調査）。
 
-- **Hobbyプランは規約上、商用利用が認められていない。** 会社の支払業務で使う以上、
-  タイムアウトの話を抜きにしてもProが要る
-- **関数の実行時間の上限**が違う。Hobbyは60秒、Proは300秒。
-  このアプリは `api/invoices` `api/gmail/scan` `api/gmail/items/[id]/import` の3つで
-  `maxDuration = 300` を宣言している。請求書1通の読み取りに10〜40秒、
-  Gmailの走査はメール数十通ぶんを1リクエストで回すため、60秒では途中で切られる
+かつては「Hobbyは60秒、Proは300秒」だったが、現在は **Hobby も 300秒**（既定かつ上限）。
+このアプリが `api/invoices` `api/gmail/scan` `api/gmail/items/[id]/import` の3つで宣言している
+`maxDuration = 300` は、無料プランでもそのまま通る。
 
-### 3-2. リポジトリを取り込む
+- 出典: [Functions Limits](https://vercel.com/docs/functions/limitations) /
+  [Hobby Plan](https://vercel.com/docs/plans/hobby)
+- **★条件: Fluid compute が有効であること**（新規プロジェクトは既定で有効）。
+  無効だと古い制限に戻る。**Settings → Functions で目視して確認すること**
+- 従量の枠（Active CPU 4時間/月・関数呼び出し100万回/月など）も大きく余る。
+  公式が「**AIモデルの呼び出しやDBクエリの待ち時間はActive CPUに算入しない**」と
+  明記しており、このアプリで一番長い処理（Claudeの応答待ち 1通8〜14秒）は枠を食わない。
+  実際にCPUを使うのはハッシュ計算やJSONの処理だけで、月1分に満たない
+
+**ただし、規約上の問題は残る。**
+
+> the Hobby plan restricts users to **non-commercial, personal use only**
+> — [Hobby Plan](https://vercel.com/docs/plans/hobby)
+
+**Hobbyは非商用・個人利用に限られる。** 会社の支払業務で使うのは商用に当たる。
+また Hobby は枠を超えると段階的に絞られるのではなく、**30日間その機能が使えなくなる**。
+月末の振込直前に止まると影響が大きい。
+
+**技術的には無料で足りるが、業務で使い続けるなら Pro にする**、という判断になる。
+Pro にする場合は 画面右上のアカウント → **Settings → Billing → Upgrade**。
+
+### 2-2. リポジトリを取り込む
 
 1. **Add New → Project**
 2. GitHubの `yamatoshugo/Invoice_Receipt` の行で **Import**
@@ -192,7 +191,7 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
      （`package.json` の `vercel-build` が自動で使われ、その中で
      `prisma migrate deploy` が走ってNeonにテーブルが作られる）
 
-### 3-3. ★Deployを押す前に、環境変数を入れる
+### 2-3. ★Deployを押す前に、環境変数を入れる
 
 同じ画面の **Environment Variables** を開き、以下を1つずつ追加する。
 （**ここで入れておかないと1回目のビルドが失敗する。** `DATABASE_URL` が無いと
@@ -203,17 +202,19 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 | `DATABASE_URL` | Neonの **Pooled** 接続文字列 |
 | `DIRECT_URL` | Neonの **Direct** 接続文字列 |
 | `AUTH_SECRET` | 手順0で作った1つ目 |
-| `AUTH_GOOGLE_ID` | 手順2のクライアントID |
-| `AUTH_GOOGLE_SECRET` | 手順2のクライアントシークレット |
-| `ALLOWED_EMAILS` | ログインを許可するアドレス（カンマ区切り）例: `henry@meetingtechnology.co.jp` |
+| `INITIAL_ADMIN_EMAIL` | 最初にログインする自分のアドレス。例: `henry@meetingtechnology.co.jp` |
+| `INITIAL_ADMIN_PASSWORD` | 自分で決める（**12文字以上**）。初回ログイン用 |
 | `ANTHROPIC_API_KEY` | Anthropicのキー（**本番用に作り直したもの**） |
 | `GMAIL_CLIENT_ID` | Gmail取り込み用（ローカルの `.env` と同じ値） |
 | `GMAIL_CLIENT_SECRET` | 同上 |
 | `GMAIL_TOKEN_KEY` | 手順0で作った2つ目 |
-| `APP_BASE_URL` | **いまは仮で `https://example.com`**（手順5で本物に直す） |
+| `APP_BASE_URL` | **いまは仮で `https://example.com`**（手順4で本物に直す） |
 
-> **絶対に入れてはいけない3つ**: `AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR`
-> - `AUTH_DEV_LOGIN` … メールアドレスだけで誰でもログインできてしまう
+> **★`INITIAL_ADMIN_*` は、Deployを押す前に入れておくこと。**
+> デプロイ直後は利用者が0人で誰もログインできず、利用者を追加する画面はログインの先に
+> あるため、後から気づいても「環境変数を足して再デプロイ」しか復旧手段がない。
+
+> **絶対に入れてはいけない2つ**: `STORAGE` / `EXTRACTOR`
 > - `STORAGE` … PDFの保管先がサーバー上の一時領域になり、消える
 > - `EXTRACTOR` … **偽の口座情報が振込CSVに載る**。本番では起動時にエラーで止まるようにしてある
 
@@ -221,9 +222,10 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 
 - ビルド中に `prisma migrate deploy` が走り、**Neonにテーブルが自動で作られる**
 - 3〜5分で完了する
-- この時点ではまだログインできない（リダイレクトURIが未登録のため）。**それで正しい**
+- ログイン自体はこの時点でできる（Googleを経由しないため）。
+  ただしGmail連携だけは、リダイレクトURIを登録する手順4まで使えない
 
-### 3-4. ★「本番URL」を正しく取る
+### 2-4. ★「本番URL」を正しく取る
 
 完了画面に出るURLは**そのデプロイ専用のURL**で、デプロイのたびに変わる。
 これを登録すると、次のデプロイでログインもGmail連携も壊れる。
@@ -237,7 +239,7 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 
 このURLを控える。以降 `<本番URL>` と書いたらこれのこと。
 
-### 3-5. ★環境変数を Production 限定にする
+### 2-5. ★環境変数を Production 限定にする
 
 取り込み画面で入れた環境変数は、既定で **Production / Preview / Development の3つ全部**に
 適用されている。このままだと、将来ブランチを切ったときに
@@ -251,7 +253,7 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 
 ---
 
-## 4. Vercel Blob（PDFの保管先）を作る
+## 3. Vercel Blob（PDFの保管先）を作る
 
 プロジェクトができたので、PDFの置き場を作って接続する。
 
@@ -271,7 +273,7 @@ DATABASE_URL="【Pooledのほう】" DIRECT_URL="【Directのほう】" npx pris
 - **Settings → Environment Variables** に `BLOB_READ_WRITE_TOKEN` が
   追加されていること（値は伏せ字でよい）
 - **この時点ではまだ反映されていない。** 環境変数は再デプロイで初めて効く。
-  手順5の最後で再デプロイするので、ここでは追加されていることの確認だけでよい
+  手順4の最後（4-4）で再デプロイするので、ここでは追加されていることの確認だけでよい
 
 ### 補足: このアプリでのBlobの使われ方
 
@@ -287,77 +289,72 @@ PDFの上限は20MBで、同名ファイルはランダムな接尾辞を付け�
 
 ---
 
-## 5. 本番URLを各所に登録して、2回目のデプロイ
+## 4. 本番URLを各所に登録して、2回目のデプロイ
 
-URLが決まったので、3か所に登録する。`<本番URL>` は手順3で発行されたもの。
+URLが決まったので、2か所に登録する。`<本番URL>` は手順2で発行されたもの。
 
-### 5-1. Vercelの環境変数を直す
+### 4-1. Vercelの環境変数を直す
 
 `APP_BASE_URL` を仮の値から **`<本番URL>`** に変更する（末尾のスラッシュは付けない）。
 
-### 5-2. ログイン用のGoogle OAuth（手順2のプロジェクト）
+### 4-2. Gmail取り込み用のGoogle OAuth
 
-GCPで**手順2で作ったプロジェクト**に切り替えてから（左上のプロジェクト名で確認）、
-**APIとサービス → 認証情報 → `invoice-receipt-web`** を開く。
+GCPで**Gmail取り込み用のプロジェクト**を開き（ログインには使わない。このアプリで
+Googleを使うのはここだけ）、**APIとサービス → 認証情報** から対象のクライアントを開く。
 
-**承認済みのリダイレクト URI** に **URIを追加** して、次を貼る:
-
-```
-<本番URL>/api/auth/callback/google
-```
-
-**承認済みの JavaScript 生成元**は空のままでよい（サーバー側で完結する認可のため）。
-**保存**を押す。
-
-### 5-3. Gmail取り込み用のGoogle OAuth（既存のプロジェクト）
-
-**別のGCPプロジェクト**なので、左上で切り替えること。
-同じく**承認済みのリダイレクト URI** に追加（**ローカル用の行は消さない**）:
+**承認済みのリダイレクト URI** に追加（**ローカル用の行は消さない**）:
 
 ```
 <本番URL>/api/gmail/callback
 ```
 
-### 5-4. URIの書き方（1文字でも違うと弾かれる）
+### 4-3. URIの書き方（1文字でも違うと弾かれる）
 
 Googleは**完全一致**で照合する。よくある間違い:
 
 | ❌ | 何が違うか |
 |---|---|
 | `http://…` | `https` でなければならない |
-| `<本番URL>/api/auth/callback/google/` | **末尾のスラッシュ**が余計 |
-| `<本番URL>/api/auth/callback` | `/google` が抜けている |
+| `<本番URL>/api/gmail/callback/` | **末尾のスラッシュ**が余計 |
+| `<本番URL>/api/gmail/` | `callback` が抜けている |
 | `https://invoice-receipt-abc123.vercel.app/...` | デプロイ専用URL。**固定ドメイン**を使う |
 
 > 反映に数分かかることがある。直後に試して失敗しても、少し待ってもう一度試す。
 
-### 5-5. 再デプロイ
+### 4-4. 再デプロイ
 
 Vercel → **Deployments** → 一番上（`main`）の行の「**…**」→ **Redeploy** → 確認ダイアログで実行。
 ビルドキャッシュの利用はどちらでもよい。
 
 **環境変数（`APP_BASE_URL` と `BLOB_READ_WRITE_TOKEN`）は、再デプロイして初めて効く。**
 
-### 5-6. 使うURLを固定する
+### 4-5. 使うURLを固定する
 
 以降、アプリは**必ず固定ドメイン**で開くこと。
 デプロイ専用URL（`…-abc123.vercel.app`）で開くと、そのホスト名で認可に行くため
-**登録済みのURIと一致せずログインできない**。ブックマークは固定ドメインで作る。
+**登録済みのURIと一致せずGmailに接続できない**。ブックマークは固定ドメインで作る。
 
 ---
 
-## 6. 本番で動かして確認する
+## 5. 本番で動かして確認する
 
 `<本番URL>`（**固定ドメイン**）を開いて、上から順に確認する。
 **1つ通るごとに、本番でしか確かめられない配線が1本ずつ潰れていく**ように並べてある。
 
-### 6-1. ログイン ＝ Google OAuth と AUTH_SECRET の確認
+### 5-1. ログイン ＝ 最初の1人を作る（AUTH_SECRET と DB の確認）
 
-- Googleのログイン画面が出て、`ALLOWED_EMAILS` のアドレスで入れる
-- **許可リストに無いアドレスでは入れないことも1回試す**（`ALLOWED_EMAILS` が
-  効いていない状態で公開するのが、この機能で最悪の事故なので必ず確認する）
+1. `/signin` が開き、**「まだ利用者が1人も登録されていません」**の案内が出ている
+   - 出ていなければ利用者がすでにいる。想定外なので `/api/health` とDBを確認する
+2. `INITIAL_ADMIN_EMAIL` のアドレスと `INITIAL_ADMIN_PASSWORD` のパスワードでログイン
+   → 請求書一覧が開き、右上に自分のアドレスが出れば成功
+3. **でたらめなパスワードでは入れないことも1回試す**
+4. **設定 → 利用者** で、実際に使う人を追加する
+   - パスワードは「自動生成」で作り、**本人には別の手段（口頭・チャット）で渡す**
+   - 追加した人が別のブラウザ（シークレットウィンドウ）でログインできることを確認する
 
-### 6-2. Gmail連携 ＝ GMAIL_TOKEN_KEY と リダイレクトURI の確認
+> **この時点ではまだ `INITIAL_ADMIN_*` を消さない。** 手順6で消す。
+
+### 5-2. Gmail連携 ＝ GMAIL_TOKEN_KEY と リダイレクトURI の確認
 
 **設定 → Gmail 連携 → 「Gmailを接続する」** → `seikyusho@meetingtechnology.co.jp` で認可。
 
@@ -369,12 +366,12 @@ Vercel → **Deployments** → 一番上（`main`）の行の「**…**」→ **
 > ローカルと本番で別々のトークンを持つことになるが、互いに影響しない
 > （再接続時に無効化するのは、そのDBに入っていた古いトークンだけ）。
 
-### 6-3. 振込依頼人の設定 ＝ CSV出力の前提
+### 5-3. 振込依頼人の設定 ＝ CSV出力の前提
 
 **設定 → 振込依頼人** に銀行の4つの値を入れて保存する。
 **まだ入手していなければ、ここは飛ばしてよい**（6-6だけが後回しになる）。
 
-### 6-4. PDFを1通アップロード ＝ Blob・Claude・DB の同時確認
+### 5-4. PDFを1通アップロード ＝ Blob・Claude・DB の同時確認
 
 **取り込み → アップロード経由** にPDFをドラッグ&ドロップ。
 
@@ -385,7 +382,7 @@ Vercel → **Deployments** → 一番上（`main`）の行の「**…**」→ **
 - **4.5MBを超えるPDFが手元にあれば、それも1通試す。**
   ブラウザから直接アップロードする経路が効いているかは、大きいファイルでしか分からない
 
-### 6-5. メールから取り込み ＝ Gmail API の確認
+### 5-5. メールから取り込み ＝ Gmail API の確認
 
 **取り込み → メール経由** で期間を指定して「取り込む」。
 
@@ -393,13 +390,13 @@ Vercel → **Deployments** → 一番上（`main`）の行の「**…**」→ **
 - 取り込みたい月を指定する（例: 先月1日〜今日）
 - 「クエリが返したメール」の件数をGmailの検索と突き合わせる
 
-### 6-6. 承認してCSV出力 ＝ 一連の出口の確認
+### 5-6. 承認してCSV出力 ＝ 一連の出口の確認
 
 請求書を1件承認 → **CSV出力**（銀行の値を入れてある場合）。
 ダウンロードしたCSVをテキストエディタで開き、
 先頭行が `1,21,0,…` で始まり、最終行が `9` であることを目視する。
 
-### 6-7. 送付依頼メール（任意）
+### 5-7. 送付依頼メール（任意）
 
 ログインが要るURL請求書が無ければ試せないが、届いていれば
 **取り込み → 送付依頼** から**自分宛に**1通送って、文字化けが無いことを確認する。
@@ -412,7 +409,22 @@ Vercel → **Deployments** → 一番上（`main`）の行の「**…**」→ **
 
 ---
 
-## 7. 運用を始める前に残っていること
+## 6. 運用を始める前に残っていること
+
+### 6-1. 初期パスワードの環境変数を消す
+
+手順5-1で最初の1人を作り、実際に使う人を［設定 ≫ 利用者］に追加し終えたら:
+
+1. Vercel → **Settings → Environment Variables** から
+   **`INITIAL_ADMIN_PASSWORD` と `INITIAL_ADMIN_EMAIL` を削除**する
+2. **Deployments → Redeploy** で再デプロイ
+3. `/api/health` の `warnings` が空になる
+4. 消したあとも**ログインはそのまま通る**（アカウントはDBにあるため）
+
+利用者が1人でもいれば、この2つは元々無視される。それでも消すのは、
+**初期パスワードがVercelの設定画面に平文で残り続けるのを避ける**ため。
+
+### 6-2. 残りの作業
 
 | 作業 | 誰が |
 |---|---|
@@ -434,11 +446,14 @@ CSVは仕様書のサンプルとバイト単位で一致させてあるが、�
 | ビルドが `P1001 Can't reach database server` で落ちる | `DIRECT_URL` がプール側（`-pooler` 入り）になっている。直結のほうに直す |
 | 接続時に `channel_binding` 等のパラメータで怒られる | 接続文字列の末尾から `&channel_binding=require` を削る（`?sslmode=require` は残す） |
 | Neonの最初の1回だけ応答が遅い | 無料プランは無操作でDBが休止する（スケールtoゼロ）。次のアクセスで数秒かかるだけで異常ではない |
-| ログインで `redirect_uri_mismatch` | 手順5-2のURIが1文字でも違う。`https`・末尾スラッシュ無し・パスまで完全一致か確認（手順5-4の表） |
-| ログインしてもログイン画面に戻ってしまう | ①`ALLOWED_EMAILS` にそのアドレスが入っていない ②デプロイ専用URLで開いている（固定ドメインで開き直す）③それでも直らなければ `AUTH_URL` に `<本番URL>` を足して再デプロイ |
+| 「メールアドレスまたはパスワードが違います」から進めない | ①そのアドレスが［設定 ≫ 利用者］に無い（別の人に追加してもらう）②最初の1人なら `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` の値と完全一致しているか（前後の空白・全角に注意） |
+| 「まだ利用者が1人も登録されていません」が出る | 正常。`INITIAL_ADMIN_*` の値でログインすればその人が登録される。案内文に「設定してください」と出ていれば環境変数自体が未設定 |
+| ログインは通るのに、すぐログイン画面に戻る | ①デプロイ専用URLで開いている（固定ドメインで開き直す）②別の人にアカウントを削除された、またはパスワードを再設定された（**どちらもその場で反映される仕様**）③それでも直らなければ `AUTH_URL` に `<本番URL>` を足して再デプロイ |
+| 全員が同時にログアウトされた | `AUTH_SECRET` が変わった。元に戻すか、各自ログインし直す（アカウントは消えていない） |
 | `Configuration` というエラー画面が出る | `AUTH_SECRET` が未設定。入れて再デプロイ |
-| Gmail接続で `redirect_uri_mismatch` | 手順5-3のURI、または `APP_BASE_URL` が本番URLになっていない |
-| 取り込みが10秒前後で失敗する | Vercelが無料プランのまま。Proでないと `maxDuration = 300` が効かない |
+| Gmail接続で `redirect_uri_mismatch` | 手順4-2のURI、または `APP_BASE_URL` が本番URLになっていない |
+| 取り込みが10〜60秒で失敗する | 関数の実行時間の上限に当たっている。Settings → Functions で **Fluid compute が有効**か、**Function Max Duration が 300** かを確認（無効だと古い制限に戻る） |
+| 画面もメール取り込みも全体的に重い | 関数のリージョンとNeonのリージョンが離れていないか。`/api/health` の `deployment.region` と `database.region` を見比べる（下記） |
 | PDFのプレビューが開けない | Blobストアがプロジェクトに接続されていない（`BLOB_READ_WRITE_TOKEN` が無い） |
 | `Vercel Blob: No read-write token found` | 下記「Blobのトークンが見つからないとき」 |
 | 「読み取りに失敗しました」が全件で出る | `ANTHROPIC_API_KEY` が未設定・失効・残高切れのいずれか |
@@ -461,11 +476,13 @@ Preview環境（main以外のブランチをpushすると作られる）は、�
 
 ```json
 {
-  "deployment": { "env": "production", "commit": "1a97d2b", "branch": "main" },
+  "deployment": { "env": "production", "commit": "1a97d2b", "branch": "main", "region": "iad1" },
+  "database": { "region": "ap-southeast-1" },
   "storage": "vercel-blob",
   "env": { "BLOB_READ_WRITE_TOKEN": false, "...": true },
   "missing": ["BLOB_READ_WRITE_TOKEN"],
   "unexpected": [],
+  "warnings": ["INITIAL_ADMIN_PASSWORD が残っています。…"],
   "ok": false
 }
 ```
@@ -474,7 +491,39 @@ Preview環境（main以外のブランチをpushすると作られる）は、�
 - **値は返さない**（設定の有無だけ）。それでもログインを必須にしてある
 - `deployment.commit` で、見ているのが最新のデプロイかどうかも分かる
 - `unexpected` に何か入っていたら、**消すまで本番で使ってはいけない**
-  （`AUTH_DEV_LOGIN` / `STORAGE` / `EXTRACTOR`）
+  （`STORAGE` / `EXTRACTOR`）
+- `warnings` は動作を止めないが放置してはいけないもの。
+  いまは初期パスワードの消し忘れだけ（手順6-1）。`ok` は落とさない —
+  必須にすると初回ログイン後ずっと `ok: false` になり、本当に困ったとき誰も見なくなる
+- **`deployment.region` と `database.region` を見比べる。** 上の例は
+  関数が米国東部・DBがシンガポールで、**DBを1回叩くたびに太平洋を往復している**状態
+
+---
+
+## 関数のリージョンを、DBと同じ方面に寄せる
+
+**症状が「なんとなく重い」としか出ないので、気付きにくいわりに効く。**
+
+このアプリは1画面を描くのにDBを9〜11回引き、Gmailの走査はメール1通につき約5回引く。
+関数とDBが離れていると、その回数ぶん往復の時間が積み上がる
+（米国東部↔シンガポールで1往復230ms前後 → 1画面で2秒以上）。
+
+1. `/api/health` で `deployment.region` と `database.region` を確認する
+2. Vercel → プロジェクト → **Settings → Functions → Function Region**
+3. Neonと同じ方面を選ぶ
+
+| Neon | 選ぶVercelのリージョン |
+|---|---|
+| `ap-southeast-1`（シンガポール） | Singapore (`sin1`) |
+| `ap-northeast-1`（東京） | Tokyo (`hnd1`) |
+
+4. **Deployments → 一番上 → … → Redeploy**
+5. `/api/health` で `deployment.region` が変わったことを確認
+
+- **リージョンの変更は無料プランでもできる**（複数リージョンの指定がPro以上というだけ）
+- **Vercel Blob のストアも同じ方面にあるか確認する。** 取り込みはBlobからPDFの実体を
+  読み直すので、Blobだけ遠いと数MBの転送で取り返した分を失う
+- コードには書かないこと。`preferredRegion` はこのNext.jsでは非推奨になっている
 
 ---
 

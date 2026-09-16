@@ -31,3 +31,17 @@ export function isUniqueConflictOn(error: unknown, field: string): boolean {
   return false;
 }
 
+/**
+ * 直列化の失敗（P2034）か。
+ *
+ * isolationLevel: "Serializable" のトランザクションは、他の処理と競合すると
+ * 「両方を直列に並べても同じ結果にならない」と判断して片方を落とす。
+ * ★これは不具合ではなく想定内の結果であり、正しい対処は「やり直す」こと。
+ *
+ * ただし黙ってリトライしないこと。ユーザーの削除のように取り返しがつかない操作では、
+ * 人がもう一度状況を見てから押し直すほうが安全なので、画面に出して止める。
+ */
+export function isSerializationFailure(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  return error.code === "P2034";
+}

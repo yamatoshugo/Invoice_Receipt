@@ -1,4 +1,3 @@
-import { devLoginEnabled } from "@/auth";
 import { storageMode } from "@/lib/storage";
 
 /**
@@ -12,10 +11,7 @@ import { storageMode } from "@/lib/storage";
  */
 export function DevModeBanner() {
   const stubExtraction = process.env.EXTRACTOR === "stub";
-  const devModes = [
-    devLoginEnabled ? "簡易ログイン" : null,
-    storageMode() === "local" ? "PDFをローカル保存" : null,
-  ].filter(Boolean);
+  const devModes = [storageMode() === "local" ? "PDFをローカル保存" : null].filter(Boolean);
 
   if (!stubExtraction && devModes.length === 0) return null;
 

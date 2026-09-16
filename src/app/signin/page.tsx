@@ -1,83 +1,101 @@
 import { redirect } from "next/navigation";
 import { AuthError } from "next-auth";
-import { devLoginEnabled, signIn } from "@/auth";
+import { signIn } from "@/auth";
+import { prisma } from "@/lib/prisma";
+import { bootstrapConfigured } from "@/lib/auth/bootstrap";
+import { Field, inputClass } from "@/components/ui";
+import { SubmitButton } from "./SubmitButton";
+
+// 利用者が登録済みかどうかを毎回見るため、事前生成もキャッシュもしない
+export const dynamic = "force-dynamic";
 
 export default async function SignInPage({
   searchParams,
 }: {
   searchParams: Promise<{ error?: string }>;
 }) {
-  const { error } = await searchParams;
+  const [{ error }, userCount] = await Promise.all([searchParams, prisma.user.count()]);
+
+  // まだ誰も登録されていない状態は、案内を出さないと
+  // 環境変数の設定漏れやタイプミスが「パスワードが違う」と区別できず、
+  // 正しいはずの値を延々と試すことになる
+  const noUsers = userCount === 0;
 
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
         <h1 className="text-lg font-semibold">請求書一括振込</h1>
         <p className="mt-2 text-sm text-slate-600">
-          許可されたGoogleアカウントでログインしてください。
+          メールアドレスとパスワードでログインしてください。
         </p>
+
+        {noUsers && (
+          <div className="mt-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+            <p className="font-medium">まだ利用者が1人も登録されていません。</p>
+            {bootstrapConfigured() ? (
+              <p className="mt-1">
+                環境変数 <code>INITIAL_ADMIN_EMAIL</code> のアドレスと{" "}
+                <code>INITIAL_ADMIN_PASSWORD</code> のパスワードでログインすると、
+                最初の1人として登録されます。
+              </p>
+            ) : (
+              <p className="mt-1">
+                環境変数 <code>INITIAL_ADMIN_EMAIL</code> と{" "}
+                <code>INITIAL_ADMIN_PASSWORD</code> を設定してから、
+                そのアドレスとパスワードでログインしてください。
+              </p>
+            )}
+          </div>
+        )}
 
         {error && (
           <p className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-            ログインできませんでした。このアカウントは利用を許可されていません。
+            {/* ★どちらが違うかは出さない。アドレスの存在が分かると総当たりの的が絞られる */}
+            メールアドレスまたはパスワードが違います。
           </p>
         )}
 
         <form
-          className="mt-6"
-          action={async () => {
+          className="mt-6 space-y-4"
+          action={async (formData: FormData) => {
             "use server";
-            await signIn("google", { redirectTo: "/invoices" });
+            try {
+              await signIn("password", {
+                email: String(formData.get("email") ?? ""),
+                password: String(formData.get("password") ?? ""),
+                redirectTo: "/invoices",
+              });
+            } catch (e) {
+              // signIn の redirectTo は例外として送出されるため、認証エラーだけを拾う
+              if (e instanceof AuthError) redirect("/signin?error=credentials");
+              throw e;
+            }
           }}
         >
-          <button
-            type="submit"
-            className="w-full rounded-md bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-700"
-          >
-            Googleでログイン
-          </button>
-        </form>
+          <Field label="メールアドレス">
+            <input
+              type="email"
+              name="email"
+              required
+              autoFocus
+              autoComplete="email"
+              placeholder="you@example.com"
+              className={inputClass}
+            />
+          </Field>
 
-        {devLoginEnabled && (
-          <div className="mt-8 border-t border-dashed border-slate-300 pt-6">
-            <p className="text-xs font-medium text-amber-700">
-              開発用ログイン（本番では無効）
-            </p>
-            <p className="mt-1 text-xs text-slate-500">
-              デプロイ前の動作確認用です。パスワードの確認は行いません。
-            </p>
-            <form
-              className="mt-3 space-y-2"
-              action={async (formData: FormData) => {
-                "use server";
-                try {
-                  await signIn("dev-login", {
-                    email: String(formData.get("email") ?? ""),
-                    redirectTo: "/invoices",
-                  });
-                } catch (e) {
-                  // signIn の redirectTo は例外として送出されるため、認証エラーだけを拾う
-                  if (e instanceof AuthError) redirect("/signin?error=dev-login");
-                  throw e;
-                }
-              }}
-            >
-              <input
-                type="email"
-                name="email"
-                required
-                placeholder="you@example.com"
-                className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-sm focus:border-slate-900 focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="w-full rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                このメールアドレスでログイン
-              </button>
-            </form>
-          </div>
-        )}
+          <Field label="パスワード">
+            <input
+              type="password"
+              name="password"
+              required
+              autoComplete="current-password"
+              className={inputClass}
+            />
+          </Field>
+
+          <SubmitButton />
+        </form>
       </div>
     </main>
   );

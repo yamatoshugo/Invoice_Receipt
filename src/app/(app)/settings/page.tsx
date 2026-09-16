@@ -1,19 +1,25 @@
+import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { listUsers } from "@/lib/auth/users";
 import { connectionState } from "@/lib/gmail/connection";
 import { tokenKeyConfigured } from "@/lib/gmail/crypto";
 import { gmailOauthConfigured } from "@/lib/gmail/oauth";
 import { SettingsForm } from "./SettingsForm";
 import { GmailConnectionPanel } from "./GmailConnectionPanel";
 import { RequestMailForm } from "./RequestMailForm";
+import { UserPanel } from "./UserPanel";
 
 export default async function SettingsPage({
   searchParams,
 }: {
   searchParams: Promise<{ gmail?: string; gmailMessage?: string }>;
 }) {
-  const [setting, gmail, params] = await Promise.all([
+  const [setting, gmail, users, session, params] = await Promise.all([
     prisma.setting.findUnique({ where: { id: "default" } }),
     connectionState(),
+    // ★prisma.user.findMany() を直接呼ばないこと（passwordHash が画面へ渡る）
+    listUsers(),
+    auth(),
     searchParams,
   ]);
 
@@ -46,6 +52,8 @@ export default async function SettingsPage({
             configured={gmailOauthConfigured() && tokenKeyConfigured()}
             notice={notice}
           />
+
+          <UserPanel users={users} currentEmail={session?.user?.email ?? ""} />
         </div>
 
         <RequestMailForm
