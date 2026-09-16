@@ -4,6 +4,12 @@ import { promisify } from "node:util";
 /**
  * ログインパスワードのハッシュ化と照合。
  *
+ * ★このファイルをクライアントコンポーネントから import しないこと。
+ * node:crypto を読むので、定数1つを取るだけでもモジュール全体が
+ * ブラウザ用バンドルに入り、promisify(scrypt) の評価で落ちて
+ * 画面には「ページを読み込めません」しか出なくなる。
+ * 画面から使えるのは passwordPolicy.ts のほうだけ。
+ *
  * ★依存を足さずに node:crypto の scrypt を使う。lib/gmail/crypto.ts と同じ判断で、
  * 「何をどう保存しているか」を1ファイル読めば確かめられる状態を優先している。
  * bcrypt系は、ネイティブ版だとWindowsとVercelの両方でビルドの面倒を抱え、
@@ -152,25 +158,10 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-/** 短すぎるパスワードを防ぐ最低ライン */
-export const PASSWORD_MIN_LENGTH = 12;
-/** 長すぎる入力でCPUを浪費させないための上限 */
-export const PASSWORD_MAX_LENGTH = 200;
-
-/**
- * パスワードの最低条件を確かめる。問題があれば画面に出す日本語、無ければ null。
- *
- * ★「記号を1文字以上」のような構成規則は課さない。規則を増やすほど
- * 人は Password1! のような推測しやすい形に寄せるため（NIST SP 800-63B）。
- * 長さだけを見る。
- */
-export function passwordProblem(plain: string): string | null {
-  if (plain.trim() === "") return "パスワードを入力してください。";
-  if (plain.length < PASSWORD_MIN_LENGTH) {
-    return `パスワードは${PASSWORD_MIN_LENGTH}文字以上にしてください。`;
-  }
-  if (plain.length > PASSWORD_MAX_LENGTH) {
-    return `パスワードは${PASSWORD_MAX_LENGTH}文字以内にしてください。`;
-  }
-  return null;
-}
+// 長さの規則は画面からも使うので passwordPolicy.ts に置いてある（理由はそちらのコメント）。
+// サーバー側は password.ts だけ見れば済むように、ここから通しで再エクスポートする。
+export {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  passwordProblem,
+} from "@/lib/auth/passwordPolicy";

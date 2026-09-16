@@ -16,7 +16,8 @@ import {
   secondaryButtonClass,
 } from "@/components/ui";
 import type { UserRow } from "@/lib/auth/users";
-import { PASSWORD_MIN_LENGTH } from "@/lib/auth/password";
+// ★@/lib/auth/password からは読まないこと（node:crypto を引きずってブラウザで落ちる）
+import { PASSWORD_MIN_LENGTH } from "@/lib/auth/passwordPolicy";
 
 /**
  * ログインできる人の一覧と追加・削除・パスワード再設定。
